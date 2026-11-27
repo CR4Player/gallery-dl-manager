@@ -11,6 +11,8 @@ import {
 } from "../util.js";
 import { navigate } from "../router.js";
 import { createLogViewer } from "../components/log-viewer.js";
+import { pageHead, cardHead, emptyState, infoBar } from "../ui.js";
+import { icon } from "../icons.js";
 
 const ACTIVE_STATUSES = new Set(["queued", "running"]);
 
@@ -22,6 +24,7 @@ export async function renderRuns(container, route, ctx) {
   let runs = [];
   let selectedId = route.id ? String(route.id) : null;
   let statusFilter = route.params?.status || "";
+  let taskIdFilter = route.params?.task_id || "";
   let searchQuery = "";
   let hasMore = false;
 
@@ -29,6 +32,40 @@ export async function renderRuns(container, route, ctx) {
   const detailPaneEl = el("div", { class: "fl-card stack runs-detail-pane" });
   const layoutEl = el("div", { class: `runs-layout${selectedId ? " has-selected" : ""}` });
   const loadMoreBtn = el("button", { type: "button", class: "fl-btn subtle sm full hidden" }, "加载更早记录");
+  const runCountEl = el("span", { class: "count-chip" }, "0");
+  const taskFilterChip = el("div", { class: `row-actions between fl-sub-card${taskIdFilter ? "" : " hidden"}`, style: { padding: "6px 10px" } });
+
+  function renderTaskFilterChip() {
+    taskFilterChip.replaceChildren();
+    if (!taskIdFilter) {
+      taskFilterChip.classList.add("hidden");
+      return;
+    }
+    taskFilterChip.classList.remove("hidden");
+    taskFilterChip.append(
+      el("span", { class: "xs" }, `仅显示任务 #${taskIdFilter} 的运行记录`),
+      el(
+        "button",
+        {
+          type: "button",
+          class: "fl-btn subtle xs",
+          onClick: async () => {
+            taskIdFilter = "";
+            renderTaskFilterChip();
+            history.replaceState(null, "", selectedId ? `#runs/${selectedId}` : "#runs");
+            try {
+              await fetchRuns(false);
+              renderRunList();
+            } catch (err) {
+              toast(`刷新运行记录失败：${err.message}`, "danger");
+            }
+          },
+        },
+        "清除筛选"
+      )
+    );
+  }
+  renderTaskFilterChip();
 
   function closeStream() {
     if (activeEs) {
@@ -41,9 +78,11 @@ export async function renderRuns(container, route, ctx) {
     }
   }
 
-  async function fetchRuns(append = false) {
-    const params = new URLSearchParams({ limit: "30" });
+  async function fetchRuns(append = false, preserveCount = false) {
+    const reqLimit = !append && preserveCount ? Math.min(200, Math.max(30, runs.length)) : 30;
+    const params = new URLSearchParams({ limit: String(reqLimit) });
     if (statusFilter) params.set("status", statusFilter);
+    if (taskIdFilter) params.set("task_id", taskIdFilter);
     if (append && runs.length) params.set("before_id", String(runs[runs.length - 1].id));
 
     const res = await api.get(`/api/runs?${params.toString()}`);
@@ -51,10 +90,11 @@ export async function renderRuns(container, route, ctx) {
     const items = Array.isArray(res?.runs) ? res.runs : [];
     runs = append ? [...runs, ...items] : items;
     const total = Number(res?.total ?? items.length);
-    hasMore = runs.length < total && items.length >= 30;
+    hasMore = runs.length < total && items.length >= reqLimit;
     loadMoreBtn.classList.toggle("hidden", !hasMore);
+    runCountEl.textContent = String(runs.length);
 
-    if (!selectedId && runs.length && window.innerWidth >= 880) {
+    if (!selectedId && runs.length && window.innerWidth >= 900) {
       selectedId = String(runs[0].id);
     }
   }
@@ -68,7 +108,7 @@ export async function renderRuns(container, route, ctx) {
     });
 
     if (!filtered.length) {
-      listCardsEl.appendChild(el("div", { class: "empty-state" }, "暂无匹配运行记录"));
+      listCardsEl.appendChild(emptyState("尝试调整状态筛选或搜索关键字", "terminal", "暂无匹配运行记录"));
       return;
     }
 
@@ -106,16 +146,25 @@ export async function renderRuns(container, route, ctx) {
   async function loadRunDetail(runId) {
     closeStream();
     if (!runId) {
-      detailPaneEl.replaceChildren(el("div", { class: "empty-state" }, "在左侧选择一次运行以查看详细统计与实时日志。"));
+      detailPaneEl.replaceChildren(
+        emptyState("在左侧选择一次运行，即可查看详细统计与实时日志。", "terminal", "选择一条运行记录")
+      );
       return;
     }
-    detailPaneEl.replaceChildren(el("div", { class: "fl-infobar" }, `正在载入 Run #${runId} 详情与日志…`));
+    detailPaneEl.replaceChildren(
+      el(
+        "div",
+        { class: "fl-infobar" },
+        el("span", { class: "infobar-icon" }, el("span", { class: "spinner" })),
+        el("div", { class: "infobar-body" }, `正在载入 Run #${runId} 详情与日志…`)
+      )
+    );
 
     let detail = null;
     try {
       detail = await api.get(`/api/runs/${encodeURIComponent(runId)}`);
     } catch (err) {
-      detailPaneEl.replaceChildren(el("div", { class: "fl-infobar danger" }, `读取运行详情失败：${err.message}`));
+      detailPaneEl.replaceChildren(infoBar({ tone: "danger", title: "读取运行详情失败", body: err.message }));
       return;
     }
     if (destroyed || String(selectedId) !== String(runId)) return;
@@ -129,6 +178,19 @@ export async function renderRuns(container, route, ctx) {
     const statWarn = el("strong", null, String(run.postprocess_warn ?? 0));
     const statDuration = el("strong", null, isLive ? "进行中" : fmtDuration(run.duration_sec));
 
+    const runStat = (label, valueNode, tone, iconName) =>
+      el(
+        "div",
+        { class: `fl-stat-card ${tone}`.trim() },
+        el(
+          "div",
+          { class: "stat-top" },
+          el("span", { class: `stat-icon ${tone}`.trim() }, icon(iconName, 15)),
+          el("span", { class: "fl-stat-label" }, label)
+        ),
+        valueNode
+      );
+
     const headerActions = el("div", { class: "row-actions" });
     if (isLive) {
       headerActions.appendChild(
@@ -140,11 +202,18 @@ export async function renderRuns(container, route, ctx) {
             onClick: async () => {
               const ok = await confirmModal({ title: "中止运行", message: `确定中止 Run #${run.id} 吗？`, okText: "中止", danger: true });
               if (!ok) return;
-              await api.post(`/api/runs/${run.id}/cancel`, {});
-              toast(`已发送中止信号 Run #${run.id}`);
-              loadRunDetail(run.id);
+              try {
+                await api.post(`/api/runs/${run.id}/cancel`, {});
+                toast(`已发送中止信号 Run #${run.id}`);
+                if (!activeEs) {
+                  loadRunDetail(run.id);
+                }
+              } catch (err) {
+                toast(`中止失败：${err.message}`, "danger");
+              }
             },
           },
+          icon("pause", 14),
           "中止运行"
         )
       );
@@ -156,70 +225,106 @@ export async function renderRuns(container, route, ctx) {
             type: "button",
             class: "fl-btn sm",
             onClick: async () => {
-              const res = await api.post(`/api/runs/${run.id}/retry`, {});
-              toast(res?.run_id ? `已创建重试 Run #${res.run_id}` : "已加入重试队列");
-              if (res?.run_id) navigate(`#runs/${res.run_id}`);
+              try {
+                const res = await api.post(`/api/runs/${run.id}/retry`, {});
+                if (res?.already_active) {
+                  toast(`关联任务已在运行或排队中 (Run #${res.run_id})`);
+                } else {
+                  toast(res?.run_id ? `已创建重试 Run #${res.run_id}` : "已加入重试队列");
+                }
+                if (res?.run_id) navigate(`#runs/${res.run_id}`);
+              } catch (err) {
+                toast(`重新运行失败：${err.message}`, "danger");
+              }
             },
           },
+          icon("refresh", 14),
           "重新运行"
         )
       );
     }
     if (run.task_id) {
-      headerActions.appendChild(
-        el("a", { class: "fl-btn subtle sm", href: `#task/${run.task_id}` }, "所属任务")
-      );
+      headerActions.appendChild(el("a", { class: "fl-btn subtle sm", href: `#task/${run.task_id}` }, icon("calendar", 14), "所属任务"));
     }
 
     const viewer = createLogViewer({ runId: run.id });
     activeViewer = viewer;
 
-    const truncNotice = detail?.log_truncated
-      ? el(
-          "div",
-          { class: "fl-infobar sm", style: { justifyContent: "space-between" } },
-          el("span", null, "日志较长，当前仅显示末尾 500 行摘要。"),
+    const sseNotice = el("div", { class: "fl-infobar warn sm hidden" });
+    const truncNotice = infoBar({
+      tone: "",
+      title: "日志较长",
+      body: "当前仅显示末尾摘要，可点击右侧按钮加载完整日志。",
+      iconName: "file-text",
+      actions: [
+        el(
+          "button",
+          {
+            type: "button",
+            class: "fl-btn subtle sm",
+            onClick: async () => {
+              try {
+                const raw = await api.get(`/api/runs/${encodeURIComponent(run.id)}/log`);
+                const lines = String(raw || "").split(/\r?\n/);
+                viewer.setLines(lines.filter((l, idx, arr) => idx < arr.length - 1 || l !== ""));
+                truncNotice.classList.add("hidden");
+              } catch (err) {
+                toast(`加载完整日志失败：${err.message}`, "danger");
+              }
+            },
+          },
+          "加载完整日志"
+        ),
+      ],
+    });
+    if (!detail?.log_truncated) {
+      truncNotice.classList.add("hidden");
+    }
+
+    const liveFiles = filesList.map((f) => f.file_path || "").filter(Boolean);
+    let showAllFiles = false;
+    const filesSummaryEl = el("summary", { class: "fl-expander-head" }, `本次下载文件清单 (${liveFiles.length})`);
+    const filesBodyEl = el("div", { class: "fl-expander-body stack xs-gap", style: { maxBlockSize: "240px", overflow: "auto" } });
+    const filesCard = el("details", { class: `fl-expander${liveFiles.length ? "" : " hidden"}` }, filesSummaryEl, filesBodyEl);
+
+    function renderFilesCard() {
+      if (!liveFiles.length) {
+        filesCard.classList.add("hidden");
+        return;
+      }
+      filesCard.classList.remove("hidden");
+      filesSummaryEl.textContent = `本次下载文件清单 (${liveFiles.length})`;
+      const limit = showAllFiles ? liveFiles.length : 100;
+      const nodes = liveFiles.slice(0, limit).map((fp) => el("div", { class: "file-path-row" }, el("span", null, fp)));
+      if (!showAllFiles && liveFiles.length > 100) {
+        nodes.push(
           el(
             "button",
             {
               type: "button",
               class: "fl-btn subtle xs",
-              onClick: async () => {
-                const raw = await api.get(`/api/runs/${encodeURIComponent(run.id)}/log`);
-                const lines = String(raw || "").split(/\r?\n/);
-                viewer.setLines(lines.filter((l, idx, arr) => idx < arr.length - 1 || l !== ""));
-                truncNotice.classList.add("hidden");
+              onClick: () => {
+                showAllFiles = true;
+                renderFilesCard();
               },
             },
-            "加载完整日志"
+            `显示全部 (共 ${liveFiles.length} 条，还有 ${liveFiles.length - 100} 条)`
           )
-        )
-      : null;
-
-    const filesCard = filesList.length
-      ? el(
-          "details",
-          { class: "fl-expander" },
-          el("summary", { class: "fl-expander-head" }, `本次下载文件清单 (${filesList.length})`),
-          el(
-            "div",
-            { class: "fl-expander-body stack xs-gap", style: { maxBlockSize: "200px", overflow: "auto" } },
-            ...filesList.slice(0, 100).map((f) =>
-              el("div", { class: "xs muted", style: { fontFamily: "var(--fl-mono)", wordBreak: "break-all" } }, f.file_path || "")
-            )
-          )
-        )
-      : null;
+        );
+      }
+      filesBodyEl.replaceChildren(...nodes);
+    }
+    renderFilesCard();
 
     const detailBody = el(
       "div",
       { class: "stack" },
       el(
         "div",
-        { class: "row-actions between" },
+        { class: "run-detail-head" },
         el(
           "div",
-          { class: "row-actions" },
+          { class: "row-actions", style: { minWidth: 0 } },
           el(
             "button",
             {
@@ -227,33 +332,33 @@ export async function renderRuns(container, route, ctx) {
               class: "fl-btn subtle sm runs-back-btn",
               onClick: () => layoutEl.classList.remove("has-selected"),
             },
-            "← 列表"
+            icon("arrow-left", 14),
+            "列表"
           ),
           statusBadge(run.status),
-          el("h2", { style: { margin: 0, fontSize: "1.1rem" } }, `#${run.id} ${run.task_name || "下载运行"}`)
+          el("h2", { class: "page-title", style: { fontSize: "1.25rem" } }, `#${run.id} ${run.task_name || "下载运行"}`)
         ),
         headerActions
       ),
       el(
         "div",
-        { class: "muted xs row-actions", style: { gap: "0.75rem", flexWrap: "wrap" } },
-        el("span", null, `触发方式: ${run.trigger_type || "manual"}${run.simulate ? " (模拟)" : ""}`),
-        el("span", null, `开始: ${fmtTime(run.started_at || run.created_at)}`),
+        { class: "run-meta-line" },
+        el("span", null, icon("zap", 13), `触发方式: ${run.trigger_type || "manual"}${run.simulate ? " (模拟)" : ""}`),
+        el("span", null, icon("clock", 13), `开始: ${fmtTime(run.started_at || run.created_at)}`),
         run.finished_at ? el("span", null, `结束: ${fmtTime(run.finished_at)}`) : null,
         run.exit_code !== null && run.exit_code !== undefined ? el("span", null, `ExitCode: ${run.exit_code}`) : null
       ),
-      run.error_summary
-        ? el("div", { class: "fl-infobar danger sm" }, run.error_summary)
-        : null,
+      run.error_summary ? infoBar({ tone: "danger", title: "运行异常", body: run.error_summary }) : null,
       el(
         "div",
         { class: "stats-grid" },
-        el("div", { class: "fl-stat-card ok" }, el("span", { class: "fl-stat-label" }, "新增下载"), statDownloaded),
-        el("div", { class: "fl-stat-card" }, el("span", { class: "fl-stat-label" }, "Archive / 已存在跳过"), statSkipped),
-        el("div", { class: `fl-stat-card${(run.postprocess_warn || 0) > 0 ? " warn" : ""}` }, el("span", { class: "fl-stat-label" }, "后处理告警"), statWarn),
-        el("div", { class: "fl-stat-card" }, el("span", { class: "fl-stat-label" }, "执行耗时"), statDuration)
+        runStat("新增下载", statDownloaded, "ok", "download"),
+        runStat("Archive / 已存在跳过", statSkipped, "", "database"),
+        runStat("后处理告警", statWarn, (run.postprocess_warn || 0) > 0 ? "warn" : "", "alert"),
+        runStat("执行耗时", statDuration, "", "clock")
       ),
       filesCard,
+      sseNotice,
       truncNotice,
       viewer.el
     );
@@ -263,6 +368,24 @@ export async function renderRuns(container, route, ctx) {
     if (isLive && typeof EventSource !== "undefined") {
       const es = new EventSource(`/api/runs/${encodeURIComponent(run.id)}/stream?tail=800`);
       activeEs = es;
+
+      es.onopen = () => {
+        sseNotice.classList.add("hidden");
+      };
+
+      es.onerror = () => {
+        sseNotice.textContent = "实时日志连接暂时中断，浏览器正在自动重连…";
+        sseNotice.classList.remove("hidden");
+        fetch("/api/auth/status", { credentials: "same-origin" })
+          .then((r) => (r.ok ? r.json() : null))
+          .then((st) => {
+            if (st && !st.auth_disabled && !st.authenticated) {
+              es.close();
+              location.replace(st.configured ? "/login" : "/setup");
+            }
+          })
+          .catch(() => {});
+      };
 
       // Backend /api/runs/{id}/stream emits unnamed `data: {"type": "...", ...}` frames
       es.onmessage = (ev) => {
@@ -276,9 +399,13 @@ export async function renderRuns(container, route, ctx) {
         }
         if (d.type === "log_snapshot") {
           viewer.setLines(d.lines || []);
+          truncNotice.classList.toggle("hidden", !d.truncated);
         } else if (d.type === "log") {
           const lines = d.lines || (d.line !== undefined ? [d.line] : []);
           if (lines.length) viewer.appendLines(lines);
+        } else if (d.type === "file" && d.file_path) {
+          liveFiles.push(d.file_path);
+          renderFilesCard();
         } else if (d.type === "stats") {
           if (d.downloaded_count !== undefined) statDownloaded.textContent = String(d.downloaded_count);
           if (d.skipped_count !== undefined) statSkipped.textContent = String(d.skipped_count);
@@ -287,12 +414,12 @@ export async function renderRuns(container, route, ctx) {
         } else if (d.type === "done") {
           es.close();
           activeEs = null;
-          fetchRuns(false).then(renderRunList).catch(() => {});
+          fetchRuns(false, true).then(renderRunList).catch(() => {});
           loadRunDetail(run.id);
           ctx?.refreshHeader?.();
         }
       };
-    } else if (Array.isArray(detail?.log_lines) && detail.log_lines.length) {
+    } else if (Array.isArray(detail?.log_lines)) {
       viewer.setLines(detail.log_lines);
     } else {
       try {
@@ -315,9 +442,19 @@ export async function renderRuns(container, route, ctx) {
       "aria-label": "按状态筛选运行记录",
       onChange: async (e) => {
         statusFilter = e.target.value;
-        await fetchRuns(false);
-        renderRunList();
-        if (selectedId) loadRunDetail(selectedId);
+        try {
+          const prevSelected = selectedId;
+          await fetchRuns(false);
+          if (selectedId && runs.length && !runs.some((r) => String(r.id) === String(selectedId))) {
+            selectedId = window.innerWidth >= 900 ? String(runs[0].id) : null;
+          }
+          renderRunList();
+          if (selectedId !== prevSelected) {
+            loadRunDetail(selectedId);
+          }
+        } catch (err) {
+          toast(`筛选运行记录失败：${err.message}`, "danger");
+        }
       },
     },
     el("option", { value: "", selected: statusFilter === "" }, "全部状态"),
@@ -331,22 +468,39 @@ export async function renderRuns(container, route, ctx) {
   );
 
   loadMoreBtn.addEventListener("click", async () => {
-    await fetchRuns(true);
-    renderRunList();
+    try {
+      await fetchRuns(true);
+      renderRunList();
+    } catch (err) {
+      toast(`加载更多失败：${err.message}`, "danger");
+    }
   });
 
   const leftPane = el(
     "div",
-    { class: "fl-card stack sm-gap runs-list-pane" },
+    { class: "fl-card stack sm-gap runs-list-pane", style: { padding: "12px" } },
+    el(
+      "div",
+      { class: "row-actions between" },
+      el("strong", { class: "sm" }, "运行记录"),
+      el("div", { class: "row-actions xs-gap" }, runCountEl)
+    ),
+    taskFilterChip,
+    el(
+      "div",
+      { class: "search-box" },
+      icon("search", 15),
+      el("input", {
+        type: "search",
+        placeholder: "筛选运行 ID 或任务名…",
+        "aria-label": "筛选运行记录",
+        onInput: (e) => {
+          searchQuery = e.target.value.trim().toLowerCase();
+          renderRunList();
+        },
+      })
+    ),
     statusSel,
-    el("input", {
-      type: "search",
-      placeholder: "筛选运行 ID 或任务名…",
-      onInput: (e) => {
-        searchQuery = e.target.value.trim().toLowerCase();
-        renderRunList();
-      },
-    }),
     listCardsEl,
     loadMoreBtn
   );
@@ -357,30 +511,32 @@ export async function renderRuns(container, route, ctx) {
   container.replaceChildren(
     el(
       "div",
-      { class: "stack" },
-      el(
-        "div",
-        { class: "row-actions between" },
-        el(
-          "div",
-          null,
-          el("h1", { class: "fl-page-title", style: { margin: 0, fontSize: "1.35rem" } }, "运行与日志"),
-          el("div", { class: "muted xs" }, "主从双栏视图 · 支持虚拟化日志滚动与实时 SSE 推送")
-        ),
-        el(
-          "button",
-          {
-            type: "button",
-            class: "fl-btn sm",
-            onClick: async () => {
-              await fetchRuns(false);
-              renderRunList();
-              if (selectedId) loadRunDetail(selectedId);
+      { class: "page-body" },
+      pageHead({
+        eyebrow: "Activity log",
+        title: "运行与日志",
+        subtitle: "主从双栏视图 · 虚拟化日志滚动 · SSE 实时推送",
+        actions: [
+          el(
+            "button",
+            {
+              type: "button",
+              class: "fl-btn sm",
+              onClick: async () => {
+                try {
+                  await fetchRuns(false, true);
+                  renderRunList();
+                  if (selectedId) loadRunDetail(selectedId);
+                } catch (err) {
+                  toast(`刷新记录失败：${err.message}`, "danger");
+                }
+              },
             },
-          },
-          "刷新记录"
-        )
-      ),
+            icon("refresh", 14),
+            "刷新记录"
+          ),
+        ],
+      }),
       layoutEl
     )
   );
@@ -390,7 +546,7 @@ export async function renderRuns(container, route, ctx) {
 
   const onListChange = async () => {
     if (destroyed) return;
-    await fetchRuns(false).catch(() => {});
+    await fetchRuns(false, true).catch(() => {});
     renderRunList();
   };
   const unsubs = [

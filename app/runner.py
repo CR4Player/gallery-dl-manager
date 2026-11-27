@@ -150,6 +150,8 @@ class TaskManager:
         self.subscribers: dict[int, set[asyncio.Queue[dict[str, Any]]]] = {}
         self.global_subscribers: set[asyncio.Queue[dict[str, Any]]] = set()
         self._workers: list[asyncio.Task[Any]] = []
+        self._target_concurrency: int = 1
+        self._next_worker_id: int = 0
         self._scheduler_task: asyncio.Task[Any] | None = None
         self._stop_event = asyncio.Event()
         self._last_cleanup_day: str = ""
@@ -225,9 +227,23 @@ class TaskManager:
         self._stop_event.clear()
         settings = get_app_settings(self.db)
         worker_count = max(1, min(3, int(settings.get("max_concurrency", 1))))
-        for i in range(worker_count):
-            self._workers.append(asyncio.create_task(self._worker_loop(i)))
+        self._target_concurrency = worker_count
+        for _ in range(worker_count):
+            w_id = self._next_worker_id
+            self._next_worker_id += 1
+            self._workers.append(asyncio.create_task(self._worker_loop(w_id)))
         self._scheduler_task = asyncio.create_task(self._scheduler_loop())
+
+    def reconfigure_concurrency(self, count: int) -> int:
+        """Dynamically adjust target worker concurrency (1..3) without restart."""
+        target = max(1, min(3, int(count)))
+        self._target_concurrency = target
+        self._workers = [w for w in self._workers if not w.done()]
+        while len(self._workers) < target and not self._stop_event.is_set():
+            w_id = self._next_worker_id
+            self._next_worker_id += 1
+            self._workers.append(asyncio.create_task(self._worker_loop(w_id)))
+        return target
 
     async def stop(self) -> None:
         self._stop_event.set()
@@ -313,20 +329,20 @@ class TaskManager:
             "postprocess_date_field": postprocess_date_field,
             "postprocess_command": postprocess_command,
         }
-        stored_urls = clean_urls if clean_urls else [f"file:{safe_input_file}"]
+        stored_urls = clean_urls + ([f"file:{safe_input_file}"] if safe_input_file else [])
+        opts_json = json.dumps(adhoc_opts, ensure_ascii=False)
         with self.db.session() as conn:
             cur = conn.execute(
                 """
-                INSERT INTO runs (task_id, task_name, trigger_type, urls_json, simulate, status, error_summary, log_file, created_at)
-                VALUES (NULL, ?, 'adhoc', ?, ?, 'queued', ?, '', ?)
+                INSERT INTO runs (task_id, task_name, trigger_type, urls_json, simulate, status, log_file, adhoc_opts_json, created_at)
+                VALUES (NULL, ?, 'adhoc', ?, ?, 'queued', '', ?, ?)
                 """,
-                (name, json.dumps(stored_urls, ensure_ascii=False), 1 if simulate else 0, json.dumps(adhoc_opts, ensure_ascii=False), now),
+                (name, json.dumps(stored_urls, ensure_ascii=False), 1 if simulate else 0, opts_json, now),
             )
             run_id = int(cur.lastrowid)
             log_file = str(self.logs_dir / f"run-{run_id}.log")
-            conn.execute("UPDATE runs SET log_file = ?, error_summary = '' WHERE id = ?", (log_file, run_id))
+            conn.execute("UPDATE runs SET log_file = ? WHERE id = ?", (log_file, run_id))
 
-        self.db.set_setting(f"adhoc_opts:{run_id}", json.dumps(adhoc_opts, ensure_ascii=False))
         self.queue.put_nowait(run_id)
         self._emit_global_event({"type": "run_queued", "run_id": run_id, "task_id": None})
         return run_id
@@ -366,7 +382,12 @@ class TaskManager:
         return False
 
     async def _worker_loop(self, _worker_idx: int) -> None:
+        cur_task = asyncio.current_task()
         while not self._stop_event.is_set():
+            self._workers = [w for w in self._workers if not w.done()]
+            if len(self._workers) > self._target_concurrency and cur_task in self._workers:
+                self._workers.remove(cur_task)
+                return
             try:
                 run_id = await asyncio.wait_for(self.queue.get(), timeout=1.0)
             except asyncio.TimeoutError:
@@ -420,9 +441,14 @@ class TaskManager:
             }
             previous_status = task["last_status"]
         else:
-            raw_opts = self.db.get_setting(f"adhoc_opts:{run_id}")
+            raw_opts = (
+                run["adhoc_opts_json"]
+                if "adhoc_opts_json" in run.keys() and run["adhoc_opts_json"]
+                else self.db.get_setting(f"adhoc_opts:{run_id}")
+            )
             opts = json.loads(raw_opts) if raw_opts else {}
-            self.db.delete_setting(f"adhoc_opts:{run_id}")
+            if self.db.get_setting(f"adhoc_opts:{run_id}") is not None:
+                self.db.delete_setting(f"adhoc_opts:{run_id}")
             previous_status = None
 
         runtime_conf = synthesize_runtime_config(
@@ -462,6 +488,7 @@ class TaskManager:
             except ValueError:
                 pass
 
+        real_urls = [u for u in urls if u and not u.startswith("file:")]
         input_file_name = str(opts.get("input_file", "") or "").strip()
         cmd_desc = ""
         input_error = ""
@@ -472,21 +499,35 @@ class TaskManager:
                 if not inp_path.is_file():
                     input_error = f"输入文件不存在: {inp_path}"
                 else:
-                    url_cnt = count_valid_urls(inp_path.read_text(encoding="utf-8", errors="replace"))
-                    if url_cnt == 0:
+                    file_lines = [
+                        ln.strip()
+                        for ln in inp_path.read_text(encoding="utf-8", errors="replace").splitlines()
+                        if ln.strip() and not ln.strip().startswith("#")
+                    ]
+                    url_cnt = len(file_lines)
+                    if real_urls:
+                        combined = file_lines + real_urls
+                        tmp_input_path = get_data_dir() / f".runtime-input-{run_id}.txt"
+                        tmp_input_path.write_text("\n".join(combined) + "\n", encoding="utf-8")
+                        cmd.extend(["-i", str(tmp_input_path)])
+                        cmd_desc = (
+                            f"gallery-dl {' '.join(shlex.quote(x) for x in cmd[3:-2])} "
+                            f"-i <合并列表: {safe_name}({url_cnt}) + {len(real_urls)} 条 URL>"
+                        )
+                    elif url_cnt == 0:
                         input_error = f"输入文件中没有有效 URL: {inp_path}"
                     else:
                         cmd.extend(["-i", str(inp_path)])
                         cmd_desc = f"gallery-dl {' '.join(shlex.quote(x) for x in cmd[3:])} (共 {url_cnt} 条 URL)"
             except ValueError as exc:
                 input_error = str(exc)
-        elif len(urls) > 5:
+        elif len(real_urls) > 5:
             tmp_input_path = get_data_dir() / f".runtime-input-{run_id}.txt"
-            tmp_input_path.write_text("\n".join(urls) + "\n", encoding="utf-8")
+            tmp_input_path.write_text("\n".join(real_urls) + "\n", encoding="utf-8")
             cmd.extend(["-i", str(tmp_input_path)])
-            cmd_desc = f"gallery-dl {' '.join(shlex.quote(x) for x in cmd[3:-2])} -i <临时列表> (共 {len(urls)} 条 URL)"
+            cmd_desc = f"gallery-dl {' '.join(shlex.quote(x) for x in cmd[3:-2])} -i <临时列表> (共 {len(real_urls)} 条 URL)"
         else:
-            cmd.extend(urls)
+            cmd.extend(real_urls)
             cmd_desc = f"gallery-dl {' '.join(shlex.quote(x) for x in cmd[3:])}"
 
         started_at = utc_now_iso()

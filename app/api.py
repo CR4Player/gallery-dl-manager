@@ -967,8 +967,48 @@ def create_app(db: Database | None = None) -> Starlette:
         if row["task_id"] is not None:
             new_run_id, already = manager.enqueue_task(int(row["task_id"]), trigger_type="retry", simulate=bool(row["simulate"]))
             return JSONResponse({"run_id": new_run_id, "already_active": already})
-        urls = json.loads(row["urls_json"])
-        new_run_id = manager.enqueue_adhoc(urls=urls, simulate=bool(row["simulate"]), name=f"重试 #{run_id}")
+        raw_urls = json.loads(row["urls_json"] or "[]")
+        real_urls = [str(u).strip() for u in raw_urls if str(u).strip() and not str(u).strip().startswith("file:")]
+        recovered_input_file = ""
+        for u in raw_urls:
+            su = str(u).strip()
+            if su.startswith("file:"):
+                recovered_input_file = su[5:].strip()
+                break
+        raw_opts = (
+            row["adhoc_opts_json"]
+            if "adhoc_opts_json" in row.keys() and row["adhoc_opts_json"]
+            else database.get_setting(f"adhoc_opts:{run_id}")
+        )
+        opts: dict[str, Any] = {}
+        if raw_opts:
+            try:
+                parsed_opts = json.loads(raw_opts)
+                if isinstance(parsed_opts, dict):
+                    opts = parsed_opts
+            except json.JSONDecodeError:
+                opts = {}
+        input_file_val = str(opts.get("input_file") or recovered_input_file).strip()
+        try:
+            new_run_id = manager.enqueue_adhoc(
+                urls=real_urls,
+                input_file=input_file_val,
+                proxy_mode=str(opts.get("proxy_mode", "inherit")),
+                proxy_url=str(opts.get("proxy_url", "")),
+                subdir=str(opts.get("subdir", "")),
+                skip_mode=str(opts.get("skip_mode", "")),
+                filename_format=str(opts.get("filename_format", "")),
+                extra_args=str(opts.get("extra_args", "")),
+                use_archive=bool(opts.get("use_archive", False)),
+                archive_backfill=bool(opts.get("archive_backfill", False)),
+                postprocess_mode=str(opts.get("postprocess_mode", "inherit")),
+                postprocess_date_field=str(opts.get("postprocess_date_field", "")),
+                postprocess_command=str(opts.get("postprocess_command", "")),
+                simulate=bool(row["simulate"]),
+                name=f"重试 #{run_id}",
+            )
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
         return JSONResponse({"run_id": new_run_id, "already_active": False})
 
     async def api_config_overview(request: Request) -> Response:
@@ -1016,6 +1056,7 @@ def create_app(db: Database | None = None) -> Starlette:
         database.set_setting("global_proxy", global_proxy)
         database.set_setting("max_concurrency", str(max_concurrency))
         database.set_setting("log_retention_days", str(log_retention_days))
+        manager.reconfigure_concurrency(max_concurrency)
 
         site_cfgs = get_postprocess_site_configs(database, pp_sites)
         pp_set = set(pp_sites)
@@ -1216,9 +1257,18 @@ def create_app(db: Database | None = None) -> Starlette:
         site = request.path_params["site"].strip()
         conf = load_global_config(database)
         extractor = conf.get("extractor", {})
+        changed = False
         if isinstance(extractor, dict) and site in extractor:
             extractor.pop(site)
             save_global_config(database, conf, note=f"删除站点 {site} 配置")
+            changed = True
+        settings = get_app_settings(database)
+        site_cfgs = get_postprocess_site_configs(database, settings["postprocess_default_sites"])
+        if site in site_cfgs:
+            site_cfgs.pop(site, None)
+            save_postprocess_site_configs(database, site_cfgs)
+            changed = True
+        if changed:
             manager.emit_global({"type": "config_changed"})
         return JSONResponse({"ok": True})
 

@@ -606,18 +606,22 @@ def compute_effective_config(db: Database, body: dict[str, Any]) -> dict[str, An
             cmd_parts.extend(shlex.split(opts["extra_args"]))
         except ValueError:
             cmd_parts.append(opts["extra_args"])
+    real_urls = [u for u in opts["urls"] if u and not str(u).startswith("file:")]
     if input_file:
         cnt = 0
         inp_path = get_inputs_dir() / input_file
         if inp_path.is_file():
             cnt = count_valid_urls(inp_path.read_text(encoding="utf-8", errors="replace"))
         cmd_parts.extend(["-i", f"/data/inputs/{input_file}"])
-        cmd_str = " ".join(shlex.quote(p) for p in cmd_parts) + (f"  # {cnt} 条 URL" if cnt else "")
-    elif len(opts["urls"]) > 5:
-        cmd_parts.extend(["-i", f"<临时列表 ({len(opts['urls'])} 条 URL)>"])
+        if real_urls:
+            cmd_str = " ".join(shlex.quote(p) for p in cmd_parts) + f"  # {cnt} + {len(real_urls)} 条 URL（合并执行）"
+        else:
+            cmd_str = " ".join(shlex.quote(p) for p in cmd_parts) + (f"  # {cnt} 条 URL" if cnt else "")
+    elif len(real_urls) > 5:
+        cmd_parts.extend(["-i", f"<临时列表 ({len(real_urls)} 条 URL)>"])
         cmd_str = " ".join(shlex.quote(p) for p in cmd_parts)
-    elif opts["urls"]:
-        cmd_parts.extend(opts["urls"])
+    elif real_urls:
+        cmd_parts.extend(real_urls)
         cmd_str = " ".join(shlex.quote(p) for p in cmd_parts)
     else:
         cmd_str = " ".join(shlex.quote(p) for p in cmd_parts) + " <URL>"

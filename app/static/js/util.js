@@ -111,7 +111,7 @@ export const RUN_STATUS_META = {
 
 export function statusBadge(status) {
   const meta = RUN_STATUS_META[status] || { label: status || "未知", cls: "neutral" };
-  return el("span", { class: `fl-badge ${meta.cls}` }, meta.label);
+  return el("span", { class: `status-pill ${meta.cls}` }, meta.label);
 }
 
 export const HEALTH_META = {
@@ -123,17 +123,19 @@ export const HEALTH_META = {
 
 export function healthBadge(health, textOverride = "") {
   const meta = HEALTH_META[health] || HEALTH_META.unknown;
-  return el("span", { class: `fl-badge ${meta.cls}` }, textOverride || meta.label);
+  return el("span", { class: `status-pill ${meta.cls}` }, textOverride || meta.label);
 }
 
 export function toast(message, variant = "info", duration = 3400) {
   const root = document.getElementById("toast-root") || document.getElementById("toast-region");
   if (!root) return;
-  const node = el("div", { class: `fl-toast${variant === "danger" || variant === "err" ? " danger" : ""}` }, message);
+  const isDanger = variant === "danger" || variant === "err";
+  const node = el("div", { class: `fl-toast${isDanger ? " danger" : ""}`, role: "status" }, message);
   root.appendChild(node);
   setTimeout(() => {
     node.style.opacity = "0";
-    node.style.transition = "opacity 160ms ease";
+    node.style.transform = "translateY(6px)";
+    node.style.transition = "opacity 160ms ease, transform 160ms ease";
     setTimeout(() => node.remove(), 180);
   }, duration);
 }
@@ -164,18 +166,35 @@ export function confirmModal({ title = "确认操作", message = "确定继续�
 
 export async function copyText(text, successMsg = "已复制到剪贴板") {
   try {
-    await navigator.clipboard.writeText(text);
-    toast(successMsg);
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text);
+      toast(successMsg);
+      return true;
+    }
+    throw new Error("clipboard unavailable");
   } catch {
+    const host = document.querySelector("dialog[open]") || document.body;
     const ta = el("textarea", {
       value: text,
-      style: { position: "fixed", opacity: "0", pointerEvents: "none" },
+      readonly: true,
+      style: { position: "fixed", insetBlockStart: "0", insetInlineStart: "0", opacity: "0", pointerEvents: "none" },
     });
-    document.body.appendChild(ta);
+    host.appendChild(ta);
+    ta.focus({ preventScroll: true });
     ta.select();
-    document.execCommand("copy");
+    let ok = false;
+    try {
+      ok = document.execCommand("copy");
+    } catch {
+      ok = false;
+    }
     ta.remove();
-    toast(successMsg);
+    if (ok) {
+      toast(successMsg);
+    } else {
+      toast("复制失败：当前环境不允许自动写入剪贴板，请手动选择文本复制", "danger");
+    }
+    return ok;
   }
 }
 

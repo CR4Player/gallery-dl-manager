@@ -12,8 +12,13 @@ class EventBus {
   start() {
     if (this.started || typeof EventSource === "undefined") return;
     this.started = true;
+    this.lastAuthCheckTs = 0;
     const es = new EventSource("/api/events");
     this.es = es;
+
+    es.onopen = () => {
+      this.emit("connected", {});
+    };
 
     es.onmessage = (ev) => {
       if (!ev.data) return;
@@ -31,7 +36,20 @@ class EventBus {
     };
 
     es.onerror = () => {
-      // Browser EventSource handles backoff automatically unless closed.
+      this.emit("connection_error", {});
+      const now = Date.now();
+      if (now - this.lastAuthCheckTs > 15000) {
+        this.lastAuthCheckTs = now;
+        fetch("/api/auth/status", { credentials: "same-origin" })
+          .then((r) => (r.ok ? r.json() : null))
+          .then((st) => {
+            if (st && !st.auth_disabled && !st.authenticated) {
+              this.stop();
+              location.replace(st.configured ? "/login" : "/setup");
+            }
+          })
+          .catch(() => {});
+      }
     };
   }
 

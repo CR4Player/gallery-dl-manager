@@ -1,5 +1,7 @@
 import { api } from "../api.js";
 import { el, debounce, copyText } from "../util.js";
+import { field } from "../ui.js";
+import { icon } from "../icons.js";
 
 const SOURCE_LABELS = {
   global: "全局设置",
@@ -75,12 +77,8 @@ export function createDownloadOptions({
       emitChange();
     },
   });
-  const proxyUrlField = el(
-    "div",
-    { class: `field${state.proxy_mode === "custom" ? "" : " hidden"}` },
-    el("label", null, "自定义代理 URL"),
-    proxyUrlInput
-  );
+  const proxyUrlField = field("自定义代理 URL", proxyUrlInput);
+  proxyUrlField.classList.toggle("hidden", state.proxy_mode !== "custom");
 
   // Skip row
   const skipSelect = el(
@@ -115,12 +113,8 @@ export function createDownloadOptions({
       emitChange();
     },
   });
-  const skipCustomField = el(
-    "div",
-    { class: `field${isCustomInitSkip ? "" : " hidden"}` },
-    el("label", null, "自定义 Skip 值"),
-    skipCustomInput
-  );
+  const skipCustomField = field("自定义 Skip 值", skipCustomInput);
+  skipCustomField.classList.toggle("hidden", !isCustomInitSkip);
 
   // Subdir, Filename, Extra args
   const subdirInput = el("input", {
@@ -180,36 +174,24 @@ export function createDownloadOptions({
   });
   const archiveCard = el(
     "div",
-    { class: "fl-sub-card stack sm-gap" },
+    { class: "subsection" },
     el(
       "div",
-      { class: "label-row" },
-      el("span", { class: "fl-subcard-title" }, "SQLite Archive 去重"),
+      { class: "subsection-head" },
+      el("span", { class: "subsection-title" }, icon("database", 15), "SQLite Archive 去重"),
       el("span", { class: "fl-badge neutral" }, "/data/archive.sqlite3")
     ),
     el(
       "div",
       { class: "form-grid-2" },
-      el(
-        "label",
-        { class: "switch-inline" },
-        archiveToggle,
-        el("span", null, "启用 Archive 记录去重")
-      ),
-      el(
-        "label",
-        { class: "switch-inline" },
-        backfillToggle,
-        el("span", null, "跳过已存在时自动回填 (skip)")
-      )
+      el("label", { class: "switch-inline" }, archiveToggle, el("span", null, "启用 Archive 记录去重")),
+      el("label", { class: "switch-inline" }, backfillToggle, el("span", null, "跳过已存在时自动回填 (skip)"))
     )
   );
 
   // Card 2: ExifTool 后处理 (strictly separated)
-  const postDateField = el(
-    "div",
-    { class: `field${state.postprocess_mode === "enabled" ? "" : " hidden"}` },
-    el("label", null, "日期元数据模板 (留空默认 {date:%Y-%m-%dT%H:%M:%S})"),
+  const postDateField = field(
+    "日期元数据模板",
     el("input", {
       type: "text",
       value: state.postprocess_date_field,
@@ -218,12 +200,13 @@ export function createDownloadOptions({
         state.postprocess_date_field = e.target.value;
         emitChange();
       },
-    })
+    }),
+    { hint: "留空则默认 {date:%Y-%m-%dT%H:%M:%S}" }
   );
-  const postCustomField = el(
-    "div",
-    { class: `field${state.postprocess_mode === "custom" ? "" : " hidden"}` },
-    el("label", null, "自定义 exec 后处理指令"),
+  postDateField.classList.toggle("hidden", state.postprocess_mode !== "enabled");
+
+  const postCustomField = field(
+    "自定义 exec 后处理指令",
     el("input", {
       type: "text",
       value: state.postprocess_command,
@@ -234,6 +217,8 @@ export function createDownloadOptions({
       },
     })
   );
+  postCustomField.classList.toggle("hidden", state.postprocess_mode !== "custom");
+
   const postSelect = el(
     "select",
     {
@@ -251,28 +236,60 @@ export function createDownloadOptions({
   );
   const postCard = el(
     "div",
-    { class: "fl-sub-card stack sm-gap" },
+    { class: "subsection" },
     el(
       "div",
-      { class: "label-row" },
-      el("span", { class: "fl-subcard-title" }, "ExifTool 后处理"),
+      { class: "subsection-head" },
+      el("span", { class: "subsection-title" }, icon("image", 15), "ExifTool 后处理"),
       el("span", { class: "fl-badge neutral" }, "元数据与拍摄时间")
     ),
-    el("div", { class: "field" }, el("label", null, "后处理模式"), postSelect),
+    field("后处理模式", postSelect),
     postDateField,
     postCustomField
   );
 
   // Effective Config Live Preview
   const cmdCode = el("pre", { class: "cmd-preview" }, "gallery-dl -c /data/.runtime-conf.json <URL>");
+  const sitesRow = el("div", { class: "row-actions xs-gap hidden" });
   const effGrid = el("div", { class: "eff-grid" });
+  const confJsonCode = el("pre", { class: "cmd-preview" }, "{}");
+  const confDetails = el(
+    "details",
+    { class: "fl-expander hidden" },
+    el("summary", { class: "fl-expander-head" }, "查看脱敏后的完整运行时配置 JSON"),
+    el(
+      "div",
+      { class: "fl-expander-body stack sm-gap" },
+      el(
+        "div",
+        { class: "row-actions between" },
+        el("span", { class: "muted xs" }, "已自动脱敏 Cookie、密码与代理凭据"),
+        el(
+          "button",
+          {
+            type: "button",
+            class: "fl-btn subtle xs",
+            onClick: () => copyText(confJsonCode.textContent, "已复制运行时配置 JSON"),
+          },
+          icon("copy", 13),
+          "复制 JSON"
+        )
+      ),
+      confJsonCode
+    )
+  );
   const previewBox = el(
     "div",
-    { class: "eff-preview-box stack sm-gap" },
+    { class: "eff-preview-box" },
     el(
       "div",
       { class: "label-row" },
-      el("strong", { class: "sm" }, "生效配置实时预览"),
+      el(
+        "div",
+        { class: "stack xs-gap" },
+        el("strong", { class: "sm" }, "生效配置实时预览"),
+        el("span", { class: "hint" }, "根据当前表单与站点默认值合并后的实际执行参数")
+      ),
       el(
         "button",
         {
@@ -280,14 +297,17 @@ export function createDownloadOptions({
           class: "fl-btn subtle xs",
           onClick: () => copyText(cmdCode.textContent, "已复制有效 CLI 命令"),
         },
+        icon("copy", 13),
         "复制命令"
       )
     ),
+    sitesRow,
     cmdCode,
-    effGrid
+    effGrid,
+    confDetails
   );
 
-  function renderEffCard(title, source, value) {
+  function renderEffCard(title, source, value, titleAttr = "") {
     return el(
       "div",
       { class: "eff-item" },
@@ -297,7 +317,7 @@ export function createDownloadOptions({
         el("span", { class: "muted xs" }, title),
         el("span", { class: "fl-badge neutral" }, source)
       ),
-      el("code", { title: String(value || "") }, String(value || "—"))
+      el("code", { title: titleAttr || String(value || "") }, String(value || "—"))
     );
   }
 
@@ -307,12 +327,15 @@ export function createDownloadOptions({
       state.proxy_mode === "direct"
         ? "直连 (无代理)"
         : state.proxy_mode === "custom"
-          ? state.proxy_url || "<未填写>"
+          ? state.proxy_url.trim() || "未填写（将直连）"
           : globalProxy || "直连 (未配全局代理)";
+    sitesRow.classList.add("hidden");
+    confDetails.classList.add("hidden");
     effGrid.replaceChildren(
       renderEffCard("输出目录", state.subdir.trim() ? "任务覆盖" : "默认", outDir),
       renderEffCard("代理", state.proxy_mode === "direct" ? "直连" : state.proxy_mode === "custom" ? "任务覆盖" : globalProxy ? "全局设置" : "直连", proxyVal),
       renderEffCard("Skip", state.skip_mode ? "任务覆盖" : "全局/默认", state.skip_mode || defaultSkip),
+      renderEffCard("文件名模板", state.filename_format.trim() ? "任务覆盖" : "默认", state.filename_format.trim() || "站点默认模板"),
       renderEffCard("Archive", state.use_archive ? (state.archive_backfill ? "启用+回填" : "已启用") : "未启用", state.use_archive ? "/data/archive.sqlite3" : "未启用")
     );
   }
@@ -335,22 +358,50 @@ export function createDownloadOptions({
         return;
       }
       cmdCode.textContent = res.command || cmdCode.textContent;
+      const sites = Array.isArray(res.sites) ? res.sites : [];
+      if (sites.length) {
+        sitesRow.classList.remove("hidden");
+        sitesRow.replaceChildren(
+          el("span", { class: "muted xs" }, "识别站点："),
+          ...sites.map((s) => el("span", { class: "fl-badge info" }, s))
+        );
+      } else {
+        sitesRow.classList.add("hidden");
+        sitesRow.replaceChildren();
+      }
+
       const f = res.fields;
       const ppList = Array.isArray(f.postprocess) ? f.postprocess : [];
       const ppText = ppList.length
         ? ppList.map((p) => `${p.site === "*" ? "全部" : p.site}(${p.mode})`).join(", ")
         : "未启用";
+      const ppTooltip = ppList
+        .map((p) => `${p.site === "*" ? "全部" : p.site}: ${p.exec_command || p.mode}`)
+        .join("\n");
+      const proxyDisplay =
+        f.proxy?.source === "task" && !f.proxy?.value
+          ? "未填写（将直连）"
+          : f.proxy?.value || "直连";
 
       effGrid.replaceChildren(
         renderEffCard("输出目录", formatSource(f.subdir?.source), res.base_directory || f.subdir?.value || "/gallery-dl"),
-        renderEffCard("代理", formatSource(f.proxy?.source), f.proxy?.value || "直连"),
+        renderEffCard("代理", formatSource(f.proxy?.source), proxyDisplay),
         renderEffCard("Skip", formatSource(f.skip?.source), String(f.skip?.value ?? defaultSkip)),
+        renderEffCard("文件名模板", formatSource(f.filename?.source), String(f.filename?.value || "站点默认模板")),
         renderEffCard(
           "Archive / 后处理",
           f.archive?.value ? (f.archive?.backfill ? "回填" : "去重") : "未启用",
-          `${f.archive?.value ? "Archive 开" : "Archive 关"} · ${ppText}`
+          `${f.archive?.value ? "Archive 开" : "Archive 关"} · ${ppText}`,
+          ppTooltip
         )
       );
+
+      if (res.config_json) {
+        confJsonCode.textContent = res.config_json;
+        confDetails.classList.remove("hidden");
+      } else {
+        confDetails.classList.add("hidden");
+      }
     } catch {
       renderLocalFallback();
     }
@@ -380,19 +431,19 @@ export function createDownloadOptions({
   root.append(
     el(
       "div",
-      { class: "form-grid-2" },
-      el("div", { class: "field" }, el("label", null, "代理策略"), proxySelect),
-      el("div", { class: "field" }, el("label", null, "Skip 增量中止策略"), skipSelect)
+      { class: "options-grid" },
+      field("代理策略", proxySelect),
+      field("Skip 增量中止策略", skipSelect)
     ),
     proxyUrlField,
     skipCustomField,
     el(
       "div",
-      { class: "form-grid-2" },
-      el("div", { class: "field" }, el("label", null, "输出子目录"), subdirInput),
-      el("div", { class: "field" }, el("label", null, "文件名模板覆盖"), filenameInput)
+      { class: "options-grid" },
+      field("输出子目录", subdirInput),
+      field("文件名模板覆盖", filenameInput)
     ),
-    el("div", { class: "field" }, el("label", null, "额外 CLI 参数"), extraArgsInput),
+    field("额外 CLI 参数", extraArgsInput, { hint: "原样附加到 gallery-dl 命令行，例如 --range 1-100" }),
     archiveCard,
     postCard,
     previewBox

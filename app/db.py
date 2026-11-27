@@ -85,6 +85,7 @@ CREATE TABLE IF NOT EXISTS runs (
     error_summary TEXT NOT NULL DEFAULT '',
     error_category TEXT NOT NULL DEFAULT '',
     log_file TEXT NOT NULL DEFAULT '',
+    adhoc_opts_json TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL
 );
 
@@ -167,6 +168,9 @@ class Database:
                 conn.execute("ALTER TABLE tasks ADD COLUMN archive_backfill INTEGER NOT NULL DEFAULT 0")
             if "input_file" not in cols:
                 conn.execute("ALTER TABLE tasks ADD COLUMN input_file TEXT NOT NULL DEFAULT ''")
+            run_cols = {r["name"] for r in conn.execute("PRAGMA table_info(runs)").fetchall()}
+            if "adhoc_opts_json" not in run_cols:
+                conn.execute("ALTER TABLE runs ADD COLUMN adhoc_opts_json TEXT NOT NULL DEFAULT ''")
             now = utc_now_iso()
             # Mark stale running/queued runs from unexpected container exit as cancelled.
             conn.execute(

@@ -1,23 +1,25 @@
 import { el, copyText } from "../util.js";
+import { icon } from "../icons.js";
 
 const ROW_HEIGHT = 22;
 const OVERSCAN = 12;
 
 function classifyLine(text) {
   const s = text || "";
-  if (/\b(ERROR|CRITICAL|FATAL|HTTP\s+401|HTTP\s+403|AuthError|Exception)\b/i.test(s) || s.startsWith("[err]")) {
+  const trimmed = s.trim();
+  if (/\[[^\]]+\]\[error\]/i.test(s) || /^\[err\]/i.test(trimmed) || /\b(ERROR|CRITICAL|FATAL|HTTP\s+401|HTTP\s+403|AuthError|Exception)\b/i.test(s)) {
     return "vlog-err";
   }
-  if (/\b(WARNING|WARN|429|retry)\b/i.test(s)) {
+  if (/^\[postprocess\]\[warn\]/i.test(trimmed) || /\[warning\]/i.test(s) || /\b(WARNING|WARN|429|retry)\b/i.test(s)) {
     return "vlog-warn";
   }
-  if (/^\s*#|\b(100%|saved|downloaded|downloaded\s+\d+)\b/i.test(s) || s.startsWith("+ ")) {
-    return "vlog-ok";
-  }
-  if (/\b(skip|skipped|abort|already exists)\b/i.test(s) || s.startsWith("[skip]")) {
+  if (/^\s*#\s+/.test(s) || /^\[postprocess\]\[skip\]/i.test(trimmed) || /^\[skip\]/i.test(trimmed) || /\b(skip|skipped|abort|already exists)\b/i.test(s)) {
     return "vlog-skip";
   }
-  if (s.startsWith("[") || s.startsWith("> ")) {
+  if (/^\[postprocess\]\[ok\]/i.test(trimmed) || /^\s*\/[^\s]+/.test(s) || /^\s*[A-Za-z]:\\[^\s]+/.test(s) || /\b(100%|saved|downloaded)\b/i.test(s) || /^\+\s/.test(trimmed)) {
+    return "vlog-ok";
+  }
+  if (trimmed.startsWith("[") || trimmed.startsWith("> ")) {
     return "vlog-meta";
   }
   return "";
@@ -32,6 +34,7 @@ export function createLogViewer({ runId = null } = {}) {
   let query = "";
   let filterMode = "all"; // "all" | "err" | "ok" | "skip"
   let autoFollow = true;
+  let programmaticScroll = false;
   let rafId = null;
 
   const searchInput = el("input", {
@@ -54,9 +57,9 @@ export function createLogViewer({ runId = null } = {}) {
       },
     },
     el("option", { value: "all" }, "全部日志"),
-    el("option", { value: "err" }, "仅错误/警告"),
+    el("option", { value: "err" }, "仅错误 / 警告"),
     el("option", { value: "ok" }, "仅新增下载"),
-    el("option", { value: "skip" }, "仅跳过/Archive")
+    el("option", { value: "skip" }, "仅跳过 / Archive")
   );
 
   const followToggle = el("input", {
@@ -72,34 +75,53 @@ export function createLogViewer({ runId = null } = {}) {
 
   const countBadge = el("span", { class: "fl-badge neutral" }, "0 行");
 
+  const head = el(
+    "div",
+    { class: "terminal-head" },
+    el("span", { class: "terminal-dots", "aria-hidden": "true" }, el("i"), el("i"), el("i")),
+    el(
+      "span",
+      { class: "terminal-title" },
+      icon("terminal", 14),
+      el("span", null, runId ? `运行日志 · Run #${runId}` : "运行日志")
+    ),
+    el("span", { class: "spacer" }),
+    el(
+      "div",
+      { class: "terminal-actions" },
+      countBadge,
+      el(
+        "button",
+        {
+          type: "button",
+          class: "fl-btn subtle xs",
+          onClick: () => copyText(filtered.join("\n"), `已复制 ${filtered.length} 行日志`),
+        },
+        icon("copy", 13),
+        "复制"
+      ),
+      runId
+        ? el(
+            "a",
+            {
+              class: "fl-btn subtle xs",
+              href: `/api/runs/${encodeURIComponent(runId)}/log?download=1`,
+              target: "_blank",
+              rel: "noopener",
+            },
+            icon("download", 13),
+            "下载"
+          )
+        : null
+    )
+  );
+
   const toolbar = el(
     "div",
     { class: "vlog-toolbar" },
-    searchInput,
+    el("div", { class: "search-box", style: { flex: 1 } }, icon("search", 14), searchInput),
     filterSelect,
-    el("label", { class: "switch-inline xs" }, followToggle, el("span", null, "自动跟随")),
-    countBadge,
-    el(
-      "button",
-      {
-        type: "button",
-        class: "fl-btn subtle xs",
-        onClick: () => copyText(filtered.join("\n"), `已复制 ${filtered.length} 行日志`),
-      },
-      "复制日志"
-    ),
-    runId
-      ? el(
-          "a",
-          {
-            class: "fl-btn subtle xs",
-            href: `/api/runs/${encodeURIComponent(runId)}/log?download=1`,
-            target: "_blank",
-            rel: "noopener",
-          },
-          "下载完整日志"
-        )
-      : null
+    el("label", { class: "switch-inline xs" }, followToggle, el("span", null, "自动跟随"))
   );
 
   const windowEl = el("div", { class: "vlog-window" });
@@ -107,13 +129,15 @@ export function createLogViewer({ runId = null } = {}) {
   const viewportEl = el("div", { class: "vlog-viewport", tabindex: "0", "aria-label": "运行日志输出" }, canvasEl);
 
   viewportEl.addEventListener("scroll", () => {
-    const nearBottom = viewportEl.scrollHeight - viewportEl.scrollTop - viewportEl.clientHeight < ROW_HEIGHT * 2;
-    if (!nearBottom && autoFollow) {
-      autoFollow = false;
-      followToggle.checked = false;
-    } else if (nearBottom && !autoFollow) {
-      autoFollow = true;
-      followToggle.checked = true;
+    if (!programmaticScroll) {
+      const nearBottom = viewportEl.scrollHeight - viewportEl.scrollTop - viewportEl.clientHeight < ROW_HEIGHT * 2;
+      if (!nearBottom && autoFollow) {
+        autoFollow = false;
+        followToggle.checked = false;
+      } else if (nearBottom && !autoFollow) {
+        autoFollow = true;
+        followToggle.checked = true;
+      }
     }
     scheduleRender();
   });
@@ -140,7 +164,11 @@ export function createLogViewer({ runId = null } = {}) {
   }
 
   function scrollToBottom() {
+    programmaticScroll = true;
     viewportEl.scrollTop = Math.max(0, canvasEl.offsetHeight - viewportEl.clientHeight);
+    requestAnimationFrame(() => {
+      programmaticScroll = false;
+    });
   }
 
   function renderWindow() {
@@ -175,7 +203,7 @@ export function createLogViewer({ runId = null } = {}) {
     rafId = requestAnimationFrame(renderWindow);
   }
 
-  const root = el("div", { class: "stack sm-gap" }, toolbar, viewportEl);
+  const root = el("div", { class: "terminal" }, head, el("div", { class: "terminal-body" }, toolbar, viewportEl));
 
   return {
     el: root,

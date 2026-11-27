@@ -1,64 +1,102 @@
 import { api } from "../api.js";
 import { el, toast, confirmModal, fmtTimeShort, fmtBytes, copyText } from "../util.js";
+import { pageHead, cardHead, field, infoBar, emptyState } from "../ui.js";
+import { icon } from "../icons.js";
 
 const TABS = [
-  { id: "general", label: "全局与代理" },
-  { id: "auth", label: "安全与口令" },
-  { id: "notifications", label: "告警通知" },
-  { id: "cookies", label: "列表与同步" },
-  { id: "raw", label: "原始 JSON 与快照" },
+  { id: "general", label: "全局与代理", icon: "settings" },
+  { id: "auth", label: "安全与口令", icon: "lock" },
+  { id: "notifications", label: "告警通知", icon: "bell" },
+  { id: "cookies", label: "列表与同步", icon: "folder" },
+  { id: "raw", label: "原始 JSON 与快照", icon: "file-text" },
 ];
 
+function settingRow(title, description, control) {
+  return el(
+    "div",
+    { class: "setting-row" },
+    el(
+      "div",
+      { class: "setting-text" },
+      el("strong", null, title),
+      description ? el("span", null, description) : null
+    ),
+    el("div", { class: "setting-control" }, control)
+  );
+}
+
 export async function renderSettings(container, route, ctx) {
+  let destroyed = false;
   const activeTab = TABS.some((t) => t.id === route.tab) ? route.tab : "general";
 
   const navEl = el(
     "nav",
-    { class: "settings-nav fl-card stack xs-gap", "aria-label": "设置分类" },
+    { class: "settings-nav", "aria-label": "设置分类" },
     ...TABS.map((t) =>
       el(
         "a",
         {
-          class: "fl-nav-item",
+          class: "settings-nav-link",
           href: `#settings/${t.id}`,
           "aria-current": t.id === activeTab ? "page" : undefined,
         },
-        t.label
+        icon(t.icon, 16),
+        el("span", null, t.label)
       )
     )
   );
 
-  const bodyEl = el("div", { class: "stack" }, el("div", { class: "fl-infobar" }, "正在载入设置项…"));
+  const bodyEl = el(
+    "div",
+    { class: "settings-content" },
+    el(
+      "div",
+      { class: "fl-infobar" },
+      el("span", { class: "infobar-icon" }, el("span", { class: "spinner" })),
+      el("div", { class: "infobar-body" }, "正在载入设置项…")
+    )
+  );
 
   container.replaceChildren(
     el(
       "div",
-      { class: "stack" },
-      el(
-        "div",
-        null,
-        el("h1", { class: "fl-page-title", style: { margin: 0, fontSize: "1.35rem" } }, "系统设置"),
-        el("div", { class: "muted xs" }, "管理全局下载策略、控制台密码、多通道告警通知、NAS 列表及原始配置快照")
-      ),
+      { class: "page-body" },
+      pageHead({
+        eyebrow: "Settings",
+        title: "系统设置",
+        subtitle: "管理全局下载策略、控制台密码、多通道告警通知、NAS 列表及原始配置快照",
+      }),
       el("div", { class: "settings-layout" }, navEl, bodyEl)
     )
   );
 
+  requestAnimationFrame(() => {
+    if (!destroyed && window.matchMedia("(max-width: 900px)").matches) {
+      navEl.querySelector('[aria-current="page"]')?.scrollIntoView({ block: "nearest", inline: "center" });
+    }
+  });
+
+  const isStale = () => destroyed;
   if (activeTab === "general") {
-    await renderGeneralTab(bodyEl, ctx);
+    await renderGeneralTab(bodyEl, ctx, isStale);
   } else if (activeTab === "auth") {
-    await renderAuthTab(bodyEl);
+    await renderAuthTab(bodyEl, isStale);
   } else if (activeTab === "notifications") {
-    await renderNotificationsTab(bodyEl);
+    await renderNotificationsTab(bodyEl, isStale);
   } else if (activeTab === "cookies") {
-    await renderCookiesTab(bodyEl);
+    await renderCookiesTab(bodyEl, isStale);
   } else if (activeTab === "raw") {
-    await renderRawTab(bodyEl, ctx);
+    await renderRawTab(bodyEl, ctx, isStale);
   }
+
+  return () => {
+    destroyed = true;
+  };
 }
 
-async function renderGeneralTab(root, ctx) {
+async function renderGeneralTab(root, ctx, isStale = () => false) {
   const overview = await api.get("/api/config/overview");
+  if (isStale()) return;
   const settings = overview?.settings || {};
   const downloader = overview?.downloader || {};
 
@@ -67,43 +105,18 @@ async function renderGeneralTab(root, ctx) {
     value: settings.global_proxy || "",
     placeholder: "http://host.docker.internal:7890",
   });
-  const skipIn = el("input", {
-    type: "text",
-    value: overview?.default_skip || "abort:7",
-    placeholder: "abort:7",
-  });
-  const concIn = el("input", {
-    type: "number",
-    min: "1",
-    max: "3",
-    value: settings.max_concurrency ?? 1,
-  });
-  const retDaysIn = el("input", {
-    type: "number",
-    min: "1",
-    max: "365",
-    value: settings.log_retention_days ?? 30,
-  });
-  const retriesIn = el("input", {
-    type: "number",
-    min: "0",
-    max: "20",
-    value: downloader.retries ?? 4,
-  });
-  const timeoutIn = el("input", {
-    type: "number",
-    min: "5",
-    max: "300",
-    step: "1",
-    value: downloader.timeout ?? 30,
-  });
+  const skipIn = el("input", { type: "text", value: overview?.default_skip || "abort:7", placeholder: "abort:7" });
+  const concIn = el("input", { type: "number", min: "1", max: "3", value: settings.max_concurrency ?? 1 });
+  const retDaysIn = el("input", { type: "number", min: "1", max: "365", value: settings.log_retention_days ?? 30 });
+  const retriesIn = el("input", { type: "number", min: "0", max: "20", value: downloader.retries ?? 4 });
+  const timeoutIn = el("input", { type: "number", min: "5", max: "300", step: "1", value: downloader.timeout ?? 30 });
   const ppSitesIn = el("input", {
     type: "text",
     value: Array.isArray(settings.postprocess_default_sites) ? settings.postprocess_default_sites.join(", ") : "twitter",
     placeholder: "例如 twitter, bluesky",
   });
 
-  const proxyStatus = el("div", { class: "muted xs hidden" });
+  const proxyStatus = el("div", { class: "hint hidden" });
 
   const testProxyBtn = el(
     "button",
@@ -129,10 +142,11 @@ async function renderGeneralTab(root, ctx) {
         }
       },
     },
-    "测试代理连通性"
+    icon("zap", 14),
+    "测试连通性"
   );
 
-  const saveBtn = el("button", { type: "submit", class: "fl-btn accent" }, "保存全局配置");
+  const saveBtn = el("button", { type: "submit", class: "fl-btn accent" }, icon("save", 15), "保存全局配置");
 
   root.replaceChildren(
     el(
@@ -165,51 +179,68 @@ async function renderGeneralTab(root, ctx) {
           }
         },
       },
-      el("h2", { class: "fl-card-title", style: { margin: 0 } }, "全局下载策略与网络代理"),
+      cardHead("全局下载策略与网络代理", {
+        iconName: "settings",
+        subtitle: "这些默认值会被任务级、站点级配置按优先级覆盖",
+      }),
       el(
         "div",
-        { class: "field" },
-        el("label", null, "全局代理 URL (HTTP / HTTPS)"),
-        el("div", { class: "input-with-btn" }, proxyIn, testProxyBtn),
+        { class: "stack xs-gap" },
+        settingRow(
+          "全局代理 URL",
+          "支持 HTTP / HTTPS / SOCKS；留空表示直连。",
+          el("div", { class: "input-with-btn" }, proxyIn, testProxyBtn)
+        ),
         proxyStatus
       ),
-      el(
-        "div",
-        { class: "form-grid-3" },
-        el("div", { class: "field" }, el("label", null, "默认 Skip 策略"), skipIn),
-        el("div", { class: "field" }, el("label", null, "最大并发下载数 (1-3)"), concIn),
-        el("div", { class: "field" }, el("label", null, "运行日志保留天数"), retDaysIn)
-      ),
-      el(
-        "div",
-        { class: "form-grid-3" },
-        el("div", { class: "field" }, el("label", null, "网络重试次数 (retries)"), retriesIn),
-        el("div", { class: "field" }, el("label", null, "请求超时秒数 (timeout)"), timeoutIn),
-        el("div", { class: "field" }, el("label", null, "默认开启 ExifTool 站点"), ppSitesIn)
-      ),
+      settingRow("默认 Skip 策略", "gallery-dl 遇到已存在文件时的行为。", skipIn),
+      settingRow("最大并发下载数", "同时执行的运行数上限（1–3），保存后立即对新入队任务生效。", concIn),
+      settingRow("运行日志保留天数", "超过此天数的历史运行日志会被清理。", retDaysIn),
+      settingRow("网络重试次数", "单次请求失败后的重试上限。", retriesIn),
+      settingRow("请求超时", "单位秒，过小可能导致大文件下载失败。", timeoutIn),
+      settingRow("默认开启 ExifTool 的站点", "逗号分隔的站点名，例如 twitter, bluesky。", ppSitesIn),
       el("div", { class: "row-actions", style: { justifyContent: "flex-end" } }, saveBtn)
     )
   );
 }
 
-async function renderAuthTab(root) {
+async function renderAuthTab(root, isStale = () => false) {
   const status = await api.get("/api/auth/status", { noAuthRedirect: true }).catch(() => ({ auth_disabled: true }));
+  if (isStale()) return;
   if (status?.auth_disabled) {
     root.replaceChildren(
       el(
         "div",
         { class: "fl-card stack" },
-        el("h2", { class: "fl-card-title", style: { margin: 0 } }, "Web 登录认证状态"),
-        el("div", { class: "fl-infobar warn" }, "当前容器通过环境变量禁用了登录认证（AUTH_DISABLED=1）。若控制台暴露在局域网/公网中，请务必关闭该选项。")
+        cardHead("Web 登录认证状态", { iconName: "lock" }),
+        infoBar({
+          tone: "warn",
+          title: "登录认证已禁用",
+          body: "当前容器通过环境变量禁用了登录认证（WEB_AUTH_DISABLED=true）。若控制台暴露在局域网 / 公网中，请务必关闭该选项。",
+        })
       )
     );
     return;
   }
 
   const curIn = el("input", { type: "password", required: true, autocomplete: "current-password", "aria-invalid": "false" });
-  const newIn = el("input", { type: "password", required: true, minlength: 6, autocomplete: "new-password", "aria-invalid": "false", placeholder: "至少 6 位" });
-  const new2In = el("input", { type: "password", required: true, minlength: 6, autocomplete: "new-password", "aria-invalid": "false", placeholder: "再次输入新密码" });
-  const submitBtn = el("button", { type: "submit", class: "fl-btn accent" }, "更新管理员密码");
+  const newIn = el("input", {
+    type: "password",
+    required: true,
+    minlength: 6,
+    autocomplete: "new-password",
+    "aria-invalid": "false",
+    placeholder: "至少 6 位",
+  });
+  const new2In = el("input", {
+    type: "password",
+    required: true,
+    minlength: 6,
+    autocomplete: "new-password",
+    "aria-invalid": "false",
+    placeholder: "再次输入新密码",
+  });
+  const submitBtn = el("button", { type: "submit", class: "fl-btn accent" }, icon("save", 15), "更新管理员密码");
 
   root.replaceChildren(
     el(
@@ -246,14 +277,12 @@ async function renderAuthTab(root) {
             }
           },
         },
-        el("h2", { class: "fl-card-title", style: { margin: 0 } }, "修改管理员密码"),
-        el("div", { class: "field" }, el("label", null, "当前密码"), curIn),
-        el(
-          "div",
-          { class: "form-grid-2" },
-          el("div", { class: "field" }, el("label", null, "新密码"), newIn),
-          el("div", { class: "field" }, el("label", null, "确认新密码"), new2In)
-        ),
+        cardHead("修改管理员密码", {
+          iconName: "lock",
+          subtitle: "密码通过 HttpOnly Cookie 维持会话，修改后请使用新密码重新登录",
+        }),
+        field("当前密码", curIn),
+        el("div", { class: "form-grid-2" }, field("新密码", newIn), field("确认新密码", new2In)),
         el(
           "div",
           { class: "row-actions between" },
@@ -263,21 +292,39 @@ async function renderAuthTab(root) {
               type: "button",
               class: "fl-btn danger sm",
               onClick: async () => {
-                await api.post("/api/auth/logout", {});
-                location.replace("/login");
+                try {
+                  await api.post("/api/auth/logout", {});
+                  location.replace("/login");
+                } catch (err) {
+                  toast(`退出会话失败：${err.message}`, "danger");
+                }
               },
             },
+            icon("logout", 14),
             "退出当前会话"
           ),
           submitBtn
+        )
+      ),
+      el(
+        "div",
+        { class: "fl-card stack sm-gap" },
+        cardHead("会话说明", { iconName: "info" }),
+        el(
+          "div",
+          { class: "muted sm" },
+          "会话通过 HttpOnly Cookie 在本地维护。若忘记密码，可在容器内执行 ",
+          el("code", null, "python3 -m app.main --reset-web-auth"),
+          " 重置并重新获取一次性初始化口令。"
         )
       )
     )
   );
 }
 
-async function renderNotificationsTab(root) {
+async function renderNotificationsTab(root, isStale = () => false) {
   const data = await api.get("/api/notifications");
+  if (isStale()) return;
   // Backend schema puts telegram/feishu/bark/webhook as TOP-LEVEL keys inside data.config
   const cfg = data?.config || {};
   const logs = Array.isArray(data?.logs) ? data.logs : [];
@@ -331,7 +378,9 @@ async function renderNotificationsTab(root) {
       role: "switch",
       switch: true,
       checked: c.enabled,
-      onChange: (e) => { c.enabled = e.target.checked; },
+      onChange: (e) => {
+        c.enabled = e.target.checked;
+      },
     });
     const testBtn = el(
       "button",
@@ -347,7 +396,7 @@ async function renderNotificationsTab(root) {
             });
             const detail = res?.results?.[0]?.detail || "";
             toast(res?.ok ? `${title} 测试消息发送成功` : `${title} 发送失败：${detail}`, res?.ok ? "info" : "danger");
-            await renderNotificationsTab(root);
+            await refreshNotificationLogs();
           } catch (err) {
             toast(`测试失败：${err.message}`, "danger");
           } finally {
@@ -355,31 +404,32 @@ async function renderNotificationsTab(root) {
           }
         },
       },
+      icon("zap", 14),
       "发送测试"
     );
 
     return el(
       "div",
-      { class: "fl-sub-card stack sm-gap" },
+      { class: "channel-card" },
       el(
         "div",
-        { class: "row-actions between" },
+        { class: "channel-head" },
         el("label", { class: "switch-inline" }, sw, el("strong", { class: "sm" }, title)),
         testBtn
       ),
       el(
         "div",
-        { class: "form-grid-2" },
+        { class: "channel-body" },
         ...fieldsSpec.map((f) =>
-          el(
-            "div",
-            { class: "field" },
-            el("label", null, f.label),
+          field(
+            f.label,
             el("input", {
               type: f.secret ? "password" : "text",
               value: c[f.prop] || "",
               placeholder: f.placeholder || "",
-              onInput: (e) => { c[f.prop] = e.target.value; },
+              onInput: (e) => {
+                c[f.prop] = e.target.value;
+              },
             })
           )
         )
@@ -387,7 +437,7 @@ async function renderNotificationsTab(root) {
     );
   }
 
-  const saveBtn = el("button", { type: "submit", class: "fl-btn accent" }, "保存通知设置");
+  const saveBtn = el("button", { type: "submit", class: "fl-btn accent" }, icon("save", 15), "保存通知设置");
 
   const form = el(
     "form",
@@ -406,22 +456,29 @@ async function renderNotificationsTab(root) {
         }
       },
     },
-    el(
-      "div",
-      { class: "row-actions between" },
-      el("h2", { class: "fl-card-title", style: { margin: 0 } }, "告警策略与推送通道"),
-      el("label", { class: "switch-inline" }, globalEnabled, el("span", null, "启用告警推送"))
-    ),
+    cardHead("告警策略与推送通道", {
+      iconName: "bell",
+      subtitle: "任务失败、认证失效或部分失败时通过所选通道推送",
+      actions: [el("label", { class: "switch-inline" }, globalEnabled, el("span", null, "启用告警推送"))],
+    }),
     el(
       "div",
       { class: "form-grid-3" },
-      el("div", { class: "field" }, el("label", null, "同类型告警冷却 (分钟)"), cooldownIn),
-      el("div", { class: "field", style: { justifyContent: "flex-end" } }, el("label", { class: "switch-inline" }, recoverySwitch, el("span", null, "故障恢复时推送通知"))),
-      el("div", { class: "field", style: { justifyContent: "flex-end" } }, el("label", { class: "switch-inline" }, proxySwitch, el("span", null, "推送请求走全局代理")))
+      field("同类型告警冷却 (分钟)", cooldownIn),
+      el(
+        "div",
+        { class: "field", style: { justifyContent: "flex-end" } },
+        el("label", { class: "switch-inline" }, recoverySwitch, el("span", null, "故障恢复时推送"))
+      ),
+      el(
+        "div",
+        { class: "field", style: { justifyContent: "flex-end" } },
+        el("label", { class: "switch-inline" }, proxySwitch, el("span", null, "推送请求走全局代理"))
+      )
     ),
     el(
       "div",
-      { class: "row-actions", style: { gap: "1rem", flexWrap: "wrap" } },
+      { class: "fl-sub-card row-actions", style: { gap: "14px" } },
       el("span", { class: "muted xs" }, "触发事件："),
       ...["auth_error", "failed", "partial"].map((evKey) =>
         el(
@@ -435,7 +492,7 @@ async function renderNotificationsTab(root) {
               else notifyOnSet.delete(evKey);
             },
           }),
-          el("span", null, evKey === "auth_error" ? "认证/Cookie失效" : evKey === "failed" ? "任务失败" : "部分失败")
+          el("span", null, evKey === "auth_error" ? "认证 / Cookie 失效" : evKey === "failed" ? "任务失败" : "部分失败")
         )
       )
     ),
@@ -460,35 +517,56 @@ async function renderNotificationsTab(root) {
     el("div", { class: "row-actions", style: { justifyContent: "flex-end" } }, saveBtn)
   );
 
+  const logsListWrap = el("div", { class: "stack xs-gap" });
+  const renderNotificationLogs = (items) => {
+    if (!items.length) {
+      logsListWrap.replaceChildren(emptyState("暂无历史推送记录", "bell", "还没有推送记录"));
+      return;
+    }
+    logsListWrap.replaceChildren(
+      ...items.slice(0, 15).map((l) =>
+        el(
+          "div",
+          { class: "fl-sub-card row-actions between" },
+          el(
+            "span",
+            { class: "sm truncate", style: { flex: 1 } },
+            `[${l.channel || "system"}] ${l.detail || ""}`
+          ),
+          l.run_id ? el("a", { class: "fl-badge info", href: `#runs/${l.run_id}` }, `Run #${l.run_id}`) : null,
+          el("span", { class: `fl-badge ${l.status === "sent" ? "ok" : "err"}` }, l.status === "sent" ? "已发送" : "失败"),
+          el("span", { class: "muted xs nowrap" }, fmtTimeShort(l.created_at))
+        )
+      )
+    );
+  };
+  const refreshNotificationLogs = async () => {
+    try {
+      const next = await api.get("/api/notifications");
+      if (isStale()) return;
+      renderNotificationLogs(Array.isArray(next?.logs) ? next.logs : []);
+    } catch {
+      // Keep current logs if refresh fails transiently
+    }
+  };
+  renderNotificationLogs(logs);
+
   const logsCard = el(
     "section",
     { class: "fl-card stack sm-gap" },
-    el("h2", { class: "fl-card-title", style: { margin: 0 } }, "近期通知推送记录"),
-    logs.length
-      ? el(
-          "div",
-          { class: "stack xs-gap" },
-          ...logs.slice(0, 15).map((l) =>
-            el(
-              "div",
-              { class: "fl-sub-card row-actions between" },
-              el("span", { class: "sm" }, `[${l.channel || "system"}] ${l.detail || ""}`),
-              el("span", { class: `fl-badge ${l.status === "sent" ? "ok" : "err"}` }, l.status === "sent" ? "已发送" : "失败"),
-              el("span", { class: "muted xs" }, fmtTimeShort(l.created_at))
-            )
-          )
-        )
-      : el("div", { class: "empty-state" }, "暂无历史推送记录")
+    cardHead("近期通知推送记录", { iconName: "activity" }),
+    logsListWrap
   );
 
   root.replaceChildren(form, logsCard);
 }
 
-async function renderCookiesTab(root) {
+async function renderCookiesTab(root, isStale = () => false) {
   const [inputsRes, syncRes] = await Promise.all([
     api.get("/api/inputs").catch(() => null),
     api.get("/api/twitter-sync/status").catch(() => null),
   ]);
+  if (isStale()) return;
 
   const files = Array.isArray(inputsRes?.files) ? inputsRes.files : [];
   const filePicker = el("input", { type: "file", accept: ".txt,text/plain", class: "fl-file-input" });
@@ -497,7 +575,7 @@ async function renderCookiesTab(root) {
   const renderFiles = (items) => {
     listEl.innerHTML = "";
     if (!items.length) {
-      listEl.appendChild(el("div", { class: "empty-state" }, "/data/inputs/ 目录下暂无 .txt 链接列表"));
+      listEl.appendChild(emptyState("/data/inputs/ 目录下暂无 .txt 链接列表", "folder", "暂无列表文件"));
       return;
     }
     for (const f of items) {
@@ -508,10 +586,11 @@ async function renderCookiesTab(root) {
           { class: "fl-sub-card row-actions between" },
           el(
             "div",
-            null,
-            el("strong", { class: "sm" }, name),
-            f.url_count !== undefined ? el("span", { class: "muted xs", style: { marginInlineStart: "0.5rem" } }, `${f.url_count} 条链接`) : null,
-            f.size ? el("span", { class: "muted xs", style: { marginInlineStart: "0.5rem" } }, fmtBytes(f.size)) : null
+            { class: "row-actions xs-gap", style: { minWidth: 0 } },
+            icon("file-text", 15),
+            el("strong", { class: "sm truncate" }, name),
+            f.url_count !== undefined ? el("span", { class: "muted xs nowrap" }, `${f.url_count} 条链接`) : null,
+            f.size ? el("span", { class: "muted xs nowrap" }, fmtBytes(f.size)) : null
           ),
           el(
             "button",
@@ -521,11 +600,16 @@ async function renderCookiesTab(root) {
               onClick: async () => {
                 const ok = await confirmModal({ title: "删除输入文件", message: `确定删除 ${name} 吗？`, okText: "删除", danger: true });
                 if (!ok) return;
-                await api.del(`/api/inputs/${encodeURIComponent(name)}`);
-                toast(`已删除 ${name}`);
-                await renderCookiesTab(root);
+                try {
+                  await api.del(`/api/inputs/${encodeURIComponent(name)}`);
+                  toast(`已删除 ${name}`);
+                  await renderCookiesTab(root, isStale);
+                } catch (err) {
+                  toast(`删除失败：${err.message}`, "danger");
+                }
               },
             },
+            icon("trash", 13),
             "删除"
           )
         )
@@ -549,12 +633,13 @@ async function renderCookiesTab(root) {
           const content = await f.text();
           await api.post("/api/inputs/upload", { filename: f.name, content });
           toast(`已上传 ${f.name} 到 /data/inputs/`);
-          await renderCookiesTab(root);
+          await renderCookiesTab(root, isStale);
         } catch (err) {
           toast(`上传失败：${err.message}`, "danger");
         }
       },
     },
+    icon("upload", 14),
     "上传到 NAS 列表"
   );
 
@@ -565,14 +650,17 @@ async function renderCookiesTab(root) {
       el(
         "section",
         { class: "fl-card stack sm-gap" },
-        el("h2", { class: "fl-card-title", style: { margin: 0 } }, "NAS 批量链接文件 (/data/inputs/*.txt)"),
+        cardHead("NAS 批量链接文件", {
+          iconName: "folder",
+          subtitle: "位于 /data/inputs/*.txt，可在任务或即时下载中以 -i 方式引用",
+        }),
         el("div", { class: "file-picker-row" }, filePicker, uploadBtn),
         listEl
       ),
       el(
         "section",
         { class: "fl-card stack sm-gap" },
-        el("h2", { class: "fl-card-title", style: { margin: 0 } }, "Twitter / X 永久红心同步中心"),
+        cardHead("Twitter / X 永久红心同步中心", { iconName: "activity" }),
         el(
           "div",
           { class: "muted sm" },
@@ -583,18 +671,23 @@ async function renderCookiesTab(root) {
         el(
           "div",
           { class: "row-actions" },
-          el("a", { class: "fl-btn accent sm", href: "#site/twitter" }, "前往 Twitter 站点配置 →"),
+          el("a", { class: "fl-btn accent sm", href: "#site/twitter" }, icon("activity", 14), "前往 Twitter 站点配置"),
           el(
             "button",
             {
               type: "button",
               class: "fl-btn sm",
               onClick: async () => {
-                const res = await api.post("/api/twitter-sync/scan-disk", {});
-                toast(`扫描完成（新增回填 ${res?.inserted ?? 0} 条，总计 ${res?.count ?? 0} 条）`);
-                await renderCookiesTab(root);
+                try {
+                  const res = await api.post("/api/twitter-sync/scan-disk", {});
+                  toast(`扫描完成（新增回填 ${res?.inserted ?? 0} 条，总计 ${res?.count ?? 0} 条）`);
+                  await renderCookiesTab(root, isStale);
+                } catch (err) {
+                  toast(`扫描失败：${err.message}`, "danger");
+                }
               },
             },
+            icon("folder", 14),
             "扫描磁盘回填 Archive"
           )
         )
@@ -603,16 +696,18 @@ async function renderCookiesTab(root) {
   );
 }
 
-async function renderRawTab(root, ctx) {
+async function renderRawTab(root, ctx, isStale = () => false) {
   // Fetch raw JSON AND snapshot history from /api/config/overview
   const [rawRes, overviewRes] = await Promise.all([
     api.get("/api/config/raw"),
     api.get("/api/config/overview").catch(() => null),
   ]);
+  if (isStale()) return;
 
-  let rawText = typeof rawRes === "string"
-    ? rawRes
-    : rawRes?.config_json ?? rawRes?.content ?? JSON.stringify(rawRes?.config || rawRes || {}, null, 2);
+  let rawText =
+    typeof rawRes === "string"
+      ? rawRes
+      : rawRes?.config_json ?? rawRes?.content ?? JSON.stringify(rawRes?.config || rawRes || {}, null, 2);
 
   // Guard against double-encoded JSON strings
   if (typeof rawText === "string" && rawText.trim().startsWith('"')) {
@@ -631,9 +726,9 @@ async function renderRawTab(root, ctx) {
       : [];
 
   const editor = el("textarea", {
-    rows: 20,
+    rows: 22,
     value: rawText,
-    style: { fontFamily: "var(--fl-mono)", fontSize: "0.78rem" },
+    style: { fontFamily: "var(--mono)", fontSize: "0.75rem" },
   });
   const noteIn = el("input", {
     type: "text",
@@ -641,7 +736,7 @@ async function renderRawTab(root, ctx) {
     style: { flex: 1, minInlineSize: "200px" },
   });
 
-  const saveBtn = el("button", { type: "button", class: "fl-btn accent" }, "保存原始配置 JSON");
+  const saveBtn = el("button", { type: "button", class: "fl-btn accent" }, icon("save", 15), "保存原始配置 JSON");
   saveBtn.addEventListener("click", async () => {
     let parsed = null;
     try {
@@ -667,7 +762,7 @@ async function renderRawTab(root, ctx) {
       });
       toast("已写入原始配置并生成历史快照");
       await ctx?.refreshHeader?.();
-      await renderRawTab(root, ctx);
+      await renderRawTab(root, ctx, isStale);
     } catch (err) {
       toast(`保存失败：${err.message}`, "danger");
     } finally {
@@ -678,7 +773,7 @@ async function renderRawTab(root, ctx) {
   const snapList = el(
     "section",
     { class: "fl-card stack sm-gap" },
-    el("h2", { class: "fl-card-title", style: { margin: 0 } }, `配置历史快照 (${snapshots.length})`),
+    cardHead(`配置历史快照 (${snapshots.length})`, { iconName: "database" }),
     snapshots.length
       ? el(
           "div",
@@ -689,7 +784,7 @@ async function renderRawTab(root, ctx) {
               { class: "fl-sub-card row-actions between" },
               el(
                 "div",
-                null,
+                { class: "stack xs-gap", style: { minWidth: 0 } },
                 el("strong", { class: "sm" }, `快照 #${s.id}`),
                 el("div", { class: "muted xs" }, `${fmtTimeShort(s.created_at)} · ${s.note || s.reason || "配置变更备份"}`)
               ),
@@ -706,10 +801,14 @@ async function renderRawTab(root, ctx) {
                       danger: true,
                     });
                     if (!ok) return;
-                    await api.post(`/api/config/snapshots/${encodeURIComponent(s.id)}/restore`, {});
-                    toast(`已回滚至快照 #${s.id}`);
-                    await ctx?.refreshHeader?.();
-                    await renderRawTab(root, ctx);
+                    try {
+                      await api.post(`/api/config/snapshots/${encodeURIComponent(s.id)}/restore`, {});
+                      toast(`已回滚至快照 #${s.id}`);
+                      await ctx?.refreshHeader?.();
+                      await renderRawTab(root, ctx, isStale);
+                    } catch (err) {
+                      toast(`回滚失败：${err.message}`, "danger");
+                    }
                   },
                 },
                 "恢复此版本"
@@ -717,7 +816,7 @@ async function renderRawTab(root, ctx) {
             )
           )
         )
-      : el("div", { class: "empty-state" }, "暂无历史配置快照")
+      : emptyState("暂无历史配置快照", "database", "还没有快照")
   );
 
   root.replaceChildren(
@@ -727,13 +826,10 @@ async function renderRawTab(root, ctx) {
       el(
         "section",
         { class: "fl-card stack sm-gap" },
-        el(
-          "div",
-          { class: "row-actions between" },
-          el("h2", { class: "fl-card-title", style: { margin: 0 } }, "gallery-dl 原始 JSON 编辑器"),
-          el(
-            "div",
-            { class: "row-actions" },
+        cardHead("gallery-dl 原始 JSON 编辑器", {
+          iconName: "file-text",
+          subtitle: "直接修改 config.json；保存前会自动生成快照，可随时回滚",
+          actions: [
             el(
               "button",
               {
@@ -757,10 +853,11 @@ async function renderRawTab(root, ctx) {
                 class: "fl-btn sm",
                 onClick: () => copyText(editor.value, "已复制完整配置 JSON"),
               },
+              icon("copy", 14),
               "复制"
-            )
-          )
-        ),
+            ),
+          ],
+        }),
         editor,
         el("div", { class: "row-actions between" }, noteIn, saveBtn)
       ),

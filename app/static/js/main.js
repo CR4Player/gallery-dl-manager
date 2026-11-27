@@ -1,6 +1,8 @@
 import { api } from "./api.js";
 import { events } from "./events.js";
 import { el, toast, confirmModal, positionPopoverFallback, SITE_LABELS } from "./util.js";
+import { icon } from "./icons.js";
+import { emptyState } from "./ui.js";
 import { startRouter, navigate, parseHash } from "./router.js";
 import { openDownloadDrawer } from "./components/new-download.js";
 
@@ -25,6 +27,7 @@ const VIEWS = {
 let activeCleanup = null;
 let alertsState = { items: [], unread_count: 0 };
 let authDisabled = true;
+let navSeq = 0;
 
 function initThemeControls() {
   const group = document.getElementById("theme-switcher");
@@ -42,7 +45,9 @@ function initThemeControls() {
     }
   };
 
-  const saved = localStorage.getItem("gdl-theme") || "system";
+  const urlTheme = new URLSearchParams(location.search).get("theme");
+  const validUrlTheme = urlTheme === "light" || urlTheme === "dark" || urlTheme === "system" ? urlTheme : null;
+  const saved = validUrlTheme || localStorage.getItem("gdl-theme") || "system";
   applyTheme(saved);
 
   for (const btn of buttons) {
@@ -179,7 +184,7 @@ function renderAlertsUI() {
 
   listEl.innerHTML = "";
   if (!items.length) {
-    listEl.appendChild(el("div", { class: "empty-state xs" }, "暂无异常与通知记录"));
+    listEl.appendChild(emptyState("暂无异常与通知记录", "bell"));
     return;
   }
 
@@ -211,30 +216,44 @@ function renderAlertsUI() {
       { class: `fl-alert-card${isUnread ? " unread" : ""}` },
       el(
         "div",
-        { class: "row-actions between" },
+        { class: "row-actions between", style: { alignItems: "flex-start" } },
         el(
           "div",
-          { class: "row-actions xs-gap" },
-          el("span", { class: `fl-badge ${severityCls}` }, severityLabel),
-          el("strong", { class: "sm" }, a.title || (siteLabel ? `${siteLabel} 异常` : "系统通知"))
+          { class: "alert-main" },
+          el("span", { class: `health-dot ${severityCls === "err" ? "error" : severityCls === "warn" ? "warn" : "ok"}`, style: { marginTop: "6px" } }),
+          el(
+            "div",
+            { class: "stack xs-gap", style: { minWidth: 0 } },
+            el(
+              "div",
+              { class: "row-actions xs-gap" },
+              el("span", { class: `fl-badge ${severityCls}` }, severityLabel),
+              el("strong", { class: "alert-title" }, a.title || (siteLabel ? `${siteLabel} 异常` : "系统通知"))
+            ),
+            a.detail || a.message ? el("div", { class: "alert-detail" }, a.detail || a.message) : null
+          )
         ),
         el("button", {
           type: "button",
-          class: "fl-btn subtle xs",
+          class: "fl-icon-btn",
           title: "删除此通知",
           "aria-label": "删除此通知",
+          style: { width: "26px", height: "26px" },
           onClick: async (e) => {
             e.stopPropagation();
-            await api.post("/api/alerts/clear", { alert_key: a.alert_key || a.key || a.id });
-            await refreshAlerts();
+            try {
+              await api.post("/api/alerts/clear", { alert_key: a.alert_key || a.key || a.id });
+              await refreshAlerts();
+            } catch (err) {
+              toast(`删除通知失败：${err.message}`, "danger");
+            }
           },
-        }, "✕")
+        }, icon("x", 13))
       ),
-      a.detail || a.message ? el("div", { class: "muted xs" }, a.detail || a.message) : null,
       act
         ? el(
             "div",
-            { class: "row-actions", style: { marginTop: "0.2rem" } },
+            { class: "row-actions", style: { paddingInlineStart: "15px" } },
             el("button", {
               type: "button",
               class: `fl-btn xs${severityCls === "err" ? " danger" : ""}`,
@@ -326,6 +345,7 @@ function initHeaderActions() {
 async function mountRoute(route) {
   const main = document.getElementById("app-main");
   if (!main) return;
+  const seq = ++navSeq;
   updateNavActive(route.nav);
 
   if (typeof activeCleanup === "function") {
@@ -339,7 +359,14 @@ async function mountRoute(route) {
 
   const renderer = VIEWS[route.view] || renderActivity;
   main.innerHTML = "";
-  main.appendChild(el("div", { class: "fl-infobar" }, "正在载入页面内容…"));
+  main.appendChild(
+    el(
+      "div",
+      { class: "fl-infobar" },
+      el("span", { class: "infobar-icon" }, el("span", { class: "spinner" })),
+      el("div", { class: "infobar-body" }, "正在载入页面内容…")
+    )
+  );
 
   try {
     const cleanup = await renderer(main, route, {
@@ -349,21 +376,38 @@ async function mountRoute(route) {
       openNewDownload: openDownloadDrawer,
       authDisabled: () => authDisabled,
     });
+    if (seq !== navSeq) {
+      if (typeof cleanup === "function") {
+        try {
+          cleanup();
+        } catch {
+          // ignore stale cleanup error
+        }
+      }
+      return;
+    }
     activeCleanup = typeof cleanup === "function" ? cleanup : null;
   } catch (err) {
+    if (seq !== navSeq) return;
     main.innerHTML = "";
     main.appendChild(
       el(
         "div",
         { class: "fl-infobar danger" },
-        el("strong", null, "页面加载失败："),
-        el("span", null, err?.message || "未知错误"),
-        el("button", {
-          type: "button",
-          class: "fl-btn sm",
-          style: { marginInlineStart: "auto" },
-          onClick: () => mountRoute(parseHash(location.hash)),
-        }, "重试")
+        el("span", { class: "infobar-icon" }, icon("x-circle", 16)),
+        el(
+          "div",
+          { class: "infobar-body" },
+          el("strong", null, "页面加载失败"),
+          el("span", null, err?.message || "未知错误")
+        ),
+        el("div", { class: "infobar-actions" },
+          el("button", {
+            type: "button",
+            class: "fl-btn sm",
+            onClick: () => mountRoute(parseHash(location.hash)),
+          }, "重试")
+        )
       )
     );
   }

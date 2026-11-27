@@ -12,6 +12,8 @@ import {
   SITE_LABELS,
 } from "../util.js";
 import { navigate } from "../router.js";
+import { pageHead, cardHead, statCard, infoBar, emptyState } from "../ui.js";
+import { icon } from "../icons.js";
 
 export async function renderActivity(container, _route, ctx) {
   let destroyed = false;
@@ -32,55 +34,41 @@ export async function renderActivity(container, _route, ctx) {
     const storage = dash?.storage_summary || {};
     const siteHealth = Array.isArray(sitesRes?.sites) ? sitesRes.sites : [];
 
-    const page = el("div", { class: "stack" });
+    const page = el("div", { class: "page-body" });
 
     page.appendChild(
-      el(
-        "div",
-        { class: "row-actions between" },
-        el(
-          "div",
-          null,
-          el("h1", { class: "fl-page-title", style: { margin: 0, fontSize: "1.35rem" } }, "动态总览"),
-          el(
-            "div",
-            { class: "muted xs" },
-            `Archive 去重条目 ${storage.archive_entries ?? 0} · Twitter 红心库 ${storage.twitter_sync_ids ?? 0} · NAS 列表 ${storage.input_files_count ?? 0}`
-          )
-        ),
-        el(
-          "div",
-          { class: "row-actions" },
-          el("button", { type: "button", class: "fl-btn sm", onClick: loadAndRender }, "刷新状态"),
-          el("button", { type: "button", class: "fl-btn accent sm", onClick: () => ctx?.openNewDownload?.() }, "+ 新建下载")
-        )
-      )
+      pageHead({
+        eyebrow: "Control Center",
+        title: "动态总览",
+        subtitle: `Archive 去重条目 ${storage.archive_entries ?? 0} · Twitter 红心库 ${storage.twitter_sync_ids ?? 0} · NAS 列表 ${storage.input_files_count ?? 0}`,
+        actions: [
+          el("button", { type: "button", class: "fl-btn sm", onClick: loadAndRender }, icon("refresh", 14), "刷新状态"),
+          el("button", { type: "button", class: "fl-btn accent sm", onClick: () => ctx?.openNewDownload?.() }, icon("plus", 14), "新建下载"),
+        ],
+      })
     );
 
     if (dash?.legacy_import_notice) {
       page.appendChild(
-        el(
-          "div",
-          { class: "fl-infobar warn" },
-          el(
-            "div",
-            { style: { flex: 1 } },
-            el("strong", null, "已导入初始定时任务（默认暂停）"),
-            el("div", { class: "xs muted" }, "为避免与旧容器同时争抢 Cookie 或写入目录，导入的任务默认处于暂停状态；确认旧容器已停用后可一键启用。")
-          ),
-          el(
-            "div",
-            { class: "row-actions" },
+        infoBar({
+          tone: "warn",
+          title: "已导入初始定时任务（默认暂停）",
+          body: "为避免与旧容器同时争抢 Cookie 或写入目录，导入的任务默认处于暂停状态；确认旧容器已停用后可一键启用。",
+          actions: [
             el(
               "button",
               {
                 type: "button",
                 class: "fl-btn accent sm",
                 onClick: async () => {
-                  await api.post("/api/tasks/enable-all", {});
-                  toast("已启用全部定时任务");
-                  await ctx?.refreshHeader?.();
-                  loadAndRender();
+                  try {
+                    await api.post("/api/tasks/enable-all", {});
+                    toast("已启用全部定时任务");
+                    await ctx?.refreshHeader?.();
+                    loadAndRender();
+                  } catch (err) {
+                    toast(`启用失败：${err.message}`, "danger");
+                  }
                 },
               },
               "一键启用全部"
@@ -91,14 +79,18 @@ export async function renderActivity(container, _route, ctx) {
                 type: "button",
                 class: "fl-btn subtle sm",
                 onClick: async () => {
-                  await api.post("/api/tasks/dismiss-import-notice", {});
-                  loadAndRender();
+                  try {
+                    await api.post("/api/tasks/dismiss-import-notice", {});
+                    loadAndRender();
+                  } catch (err) {
+                    toast(`操作失败：${err.message}`, "danger");
+                  }
                 },
               },
               "知道了"
-            )
-          )
-        )
+            ),
+          ],
+        })
       );
     }
 
@@ -113,29 +105,27 @@ export async function renderActivity(container, _route, ctx) {
       el(
         "div",
         { class: "stats-grid" },
-        el(
-          "div",
-          { class: "fl-stat-card" },
-          el("span", { class: "fl-stat-label" }, "运行中 / 排队"),
-          el("strong", null, `${runningCount} / ${queuedCount}`),
-          el("div", { class: "muted xs" }, dash?.scheduler_paused ? "全局调度已暂停" : "自动调度运行中")
-        ),
-        el(
-          "div",
-          { class: "fl-stat-card ok" },
-          el("span", { class: "fl-stat-label" }, "今日新增文件"),
-          el("strong", null, String(todayFiles)),
-          el("div", { class: "muted xs" }, "已自动去重并校验")
-        ),
-        el(
-          "div",
-          { class: "fl-stat-card" },
-          el("span", { class: "fl-stat-label" }, "近 7 天累计入库"),
-          el("strong", null, String(weekFiles)),
-          recentRuns.length
+        statCard({
+          label: "运行中 / 排队",
+          value: `${runningCount} / ${queuedCount}`,
+          hint: dash?.scheduler_paused ? "全局调度已暂停" : "自动调度运行中",
+          iconName: "activity",
+        }),
+        statCard({
+          label: "今日新增文件",
+          value: String(todayFiles),
+          hint: "已自动去重并校验",
+          tone: "ok",
+          iconName: "download",
+        }),
+        statCard({
+          label: "近 7 天累计入库",
+          value: String(weekFiles),
+          iconName: "database",
+          extra: recentRuns.length
             ? el(
-                "div",
-                { class: "health-bars", style: { marginTop: "0.25rem" }, title: "近期运行结果趋势" },
+                "span",
+                { class: "health-bars", title: "近期运行结果趋势" },
                 ...recentRuns.slice(0, 12).reverse().map((r) =>
                   el("span", {
                     class: `health-bar ${r.status}`,
@@ -143,83 +133,90 @@ export async function renderActivity(container, _route, ctx) {
                   })
                 )
               )
-            : el("div", { class: "muted xs" }, "持续累积媒体档案")
-        ),
-        el(
-          "div",
-          { class: `fl-stat-card${stats.task_failing > 0 ? " warn" : ""}` },
-          el("span", { class: "fl-stat-label" }, "已启用定时任务"),
-          el("strong", null, `${enabledTasks} / ${totalTasks}`),
-          el("div", { class: "muted xs" }, stats.task_failing > 0 ? `${stats.task_failing} 个任务近期存在异常` : "全部任务状态正常")
-        )
+            : null,
+          hint: recentRuns.length ? "" : "持续累积媒体档案",
+        }),
+        statCard({
+          label: "已启用定时任务",
+          value: `${enabledTasks} / ${totalTasks}`,
+          hint: stats.task_failing > 0 ? `${stats.task_failing} 个任务近期存在异常` : "全部任务状态正常",
+          tone: stats.task_failing > 0 ? "warn" : "",
+          iconName: "calendar",
+        })
       )
     );
 
     if (recentAlerts.length) {
-      const insCard = el(
-        "section",
-        { class: "fl-card stack sm-gap" },
-        el("h2", { class: "fl-card-title", style: { margin: 0 } }, `近期异常运行 (${recentAlerts.length})`)
-      );
-      for (const r of recentAlerts.slice(0, 4)) {
-        const sevCls = r.status === "partial" ? "warn" : "danger";
-        insCard.appendChild(
+      const alertRows = recentAlerts.slice(0, 4).map((r) => {
+        const tone = r.status === "partial" ? "warn" : "danger";
+        return el(
+          "div",
+          { class: "fl-sub-card row-actions between", style: { alignItems: "center" } },
           el(
             "div",
-            { class: `fl-infobar ${sevCls}` },
+            { class: "row-actions", style: { minWidth: 0, flex: 1 } },
+            el("span", { class: `health-dot ${tone === "warn" ? "warn" : "error"}`, style: { flex: "none" } }),
             el(
               "div",
-              { style: { flex: 1 } },
+              { class: "stack xs-gap", style: { minWidth: 0 } },
               el("strong", { class: "sm" }, `#${r.id} ${r.task_name}`),
-              el("div", { class: "xs muted" }, r.error_summary || r.error_category || `状态：${r.status}`)
-            ),
-            el(
-              "button",
-              {
-                type: "button",
-                class: "fl-btn sm",
-                onClick: () => navigate(`#runs/${r.id}`),
-              },
-              "查看日志"
+              el("span", { class: "muted xs" }, r.error_summary || r.error_category || `状态：${r.status}`)
             )
+          ),
+          el(
+            "button",
+            { type: "button", class: "fl-btn sm", onClick: () => navigate(`#runs/${r.id}`) },
+            icon("file-text", 14),
+            "查看日志"
           )
         );
-      }
-      page.appendChild(insCard);
+      });
+
+      page.appendChild(
+        el(
+          "section",
+          { class: "fl-card stack sm-gap" },
+          cardHead(`近期异常运行 (${recentAlerts.length})`, { iconName: "alert", subtitle: "需要关注的失败、认证失效或部分失败记录" }),
+          ...alertRows
+        )
+      );
     }
 
-    const leftCol = el("div", { class: "stack" });
-    const rightCol = el("div", { class: "stack" });
+    const leftCol = el("div", { class: "dashboard-col" });
+    const rightCol = el("div", { class: "dashboard-col" });
 
-    // Live / Queued card
+    // Live / queued card
     const queueCard = el(
       "section",
-      { class: "fl-card stack sm-gap" },
-      el(
-        "div",
-        { class: "row-actions between" },
-        el("h2", { class: "fl-card-title", style: { margin: 0 } }, "正在运行与等待队列"),
-        el("a", { class: "fl-btn subtle xs", href: "#runs" }, "查看全部记录 →")
-      )
+      { class: "fl-card stack" },
+      cardHead("正在运行与等待队列", {
+        iconName: "zap",
+        subtitle: activeRuns.length ? `${activeRuns.length} 个活动任务` : "空闲",
+        actions: [el("a", { class: "fl-btn subtle xs", href: "#runs" }, "全部记录", icon("chevron-right", 13))],
+      })
     );
     if (!activeRuns.length) {
-      queueCard.appendChild(el("div", { class: "empty-state" }, "当前没有正在运行或排队中的下载任务"));
+      queueCard.appendChild(emptyState("当前没有正在运行或排队中的下载任务", "zap", "队列空闲"));
     } else {
       for (const r of activeRuns) {
         queueCard.appendChild(
           el(
             "div",
-            { class: "fl-sub-card row-actions between" },
+            { class: "upcoming-item" },
             el(
               "div",
-              { class: "stack xs-gap", style: { minWidth: 0, flex: 1 } },
+              { class: "row-actions", style: { minWidth: 0, flex: 1 } },
+              statusBadge(r.status),
               el(
                 "div",
-                { class: "row-actions xs-gap" },
-                statusBadge(r.status),
-                el("a", { href: `#runs/${r.id}`, class: "sm", style: { fontWeight: 600 } }, `#${r.id} ${r.task_name || "即时下载"}`)
-              ),
-              el("div", { class: "muted xs" }, `已下载 +${r.downloaded_count ?? 0} · 跳过 ${r.skipped_count ?? 0} · ${fmtTimeShort(r.started_at || r.created_at)}`)
+                { class: "stack xs-gap", style: { minWidth: 0 } },
+                el("a", { href: `#runs/${r.id}`, class: "task-name" }, `#${r.id} ${r.task_name || "即时下载"}`),
+                el(
+                  "span",
+                  { class: "muted xs" },
+                  `已下载 +${r.downloaded_count ?? 0} · 跳过 ${r.skipped_count ?? 0} · ${fmtTimeShort(r.started_at || r.created_at)}`
+                )
+              )
             ),
             el(
               "button",
@@ -229,11 +226,16 @@ export async function renderActivity(container, _route, ctx) {
                 onClick: async () => {
                   const ok = await confirmModal({ title: "中止运行", message: `确定中止 Run #${r.id} 吗？`, okText: "中止", danger: true });
                   if (!ok) return;
-                  await api.post(`/api/runs/${r.id}/cancel`, {});
-                  toast(`已请求中止 Run #${r.id}`);
-                  loadAndRender();
+                  try {
+                    await api.post(`/api/runs/${r.id}/cancel`, {});
+                    toast(`已请求中止 Run #${r.id}`);
+                    loadAndRender();
+                  } catch (err) {
+                    toast(`中止失败：${err.message}`, "danger");
+                  }
                 },
               },
+              icon("pause", 13),
               "中止"
             )
           )
@@ -245,27 +247,26 @@ export async function renderActivity(container, _route, ctx) {
     // Upcoming scheduled tasks
     const upCard = el(
       "section",
-      { class: "fl-card stack sm-gap" },
-      el(
-        "div",
-        { class: "row-actions between" },
-        el("h2", { class: "fl-card-title", style: { margin: 0 } }, "即将执行定时任务"),
-        el("a", { class: "fl-btn subtle xs", href: "#tasks" }, "管理任务 →")
-      )
+      { class: "fl-card stack" },
+      cardHead("即将执行的定时任务", {
+        iconName: "clock",
+        subtitle: "按 Cron 自动触发",
+        actions: [el("a", { class: "fl-btn subtle xs", href: "#tasks" }, "管理任务", icon("chevron-right", 13))],
+      })
     );
     if (!upcoming.length) {
-      upCard.appendChild(el("div", { class: "empty-state" }, "暂无已启用的定时任务"));
+      upCard.appendChild(emptyState("暂无已启用的定时任务", "calendar", "没有排程"));
     } else {
       for (const t of upcoming.slice(0, 6)) {
         upCard.appendChild(
           el(
             "div",
-            { class: "fl-sub-card row-actions between" },
+            { class: "upcoming-item" },
             el(
               "div",
-              { style: { minWidth: 0, flex: 1 } },
-              el("a", { href: `#task/${t.id}`, class: "sm", style: { fontWeight: 600 } }, t.name || `任务 #${t.id}`),
-              el("div", { class: "muted xs" }, `${t.cron_desc || t.cron_expr} · 下次执行 ${relTime(t.next_run_at)}`)
+              { class: "stack xs-gap", style: { minWidth: 0, flex: 1 } },
+              el("a", { href: `#task/${t.id}`, class: "task-name" }, t.name || `任务 #${t.id}`),
+              el("span", { class: "muted xs" }, `${t.cron_desc || t.cron_expr} · 下次执行 ${relTime(t.next_run_at)}`)
             ),
             el(
               "button",
@@ -273,11 +274,20 @@ export async function renderActivity(container, _route, ctx) {
                 type: "button",
                 class: "fl-btn sm",
                 onClick: async () => {
-                  const res = await api.post(`/api/tasks/${t.id}/run`, { simulate: false });
-                  toast(res?.run_id ? `已触发运行 #${res.run_id}` : "已加入队列");
-                  loadAndRender();
+                  try {
+                    const res = await api.post(`/api/tasks/${t.id}/run`, { simulate: false });
+                    if (res?.already_active) {
+                      toast(`任务已在运行或排队中 (Run #${res.run_id})`);
+                    } else {
+                      toast(res?.run_id ? `已触发运行 #${res.run_id}` : "已加入队列");
+                    }
+                    loadAndRender();
+                  } catch (err) {
+                    toast(`触发失败：${err.message}`, "danger");
+                  }
                 },
               },
+              icon("play", 13),
               "立即运行"
             )
           )
@@ -286,19 +296,17 @@ export async function renderActivity(container, _route, ctx) {
     }
     leftCol.appendChild(upCard);
 
-    // Recent runs card
+    // Recent runs
     const recentCard = el(
       "section",
-      { class: "fl-card stack sm-gap" },
-      el(
-        "div",
-        { class: "row-actions between" },
-        el("h2", { class: "fl-card-title", style: { margin: 0 } }, "最近运行结果"),
-        el("a", { class: "fl-btn subtle xs", href: "#runs" }, "完整记录 →")
-      )
+      { class: "fl-card stack" },
+      cardHead("最近运行结果", {
+        iconName: "terminal",
+        actions: [el("a", { class: "fl-btn subtle xs", href: "#runs" }, "完整记录", icon("chevron-right", 13))],
+      })
     );
     if (!recentRuns.length) {
-      recentCard.appendChild(el("div", { class: "empty-state" }, "暂无历史运行记录"));
+      recentCard.appendChild(emptyState("暂无历史运行记录", "terminal", "还没有运行数据"));
     } else {
       for (const r of recentRuns.slice(0, 7)) {
         recentCard.appendChild(
@@ -314,7 +322,13 @@ export async function renderActivity(container, _route, ctx) {
             el(
               "div",
               { class: "run-item-meta" },
-              `+${r.downloaded_count ?? 0} 新增 · ${r.skipped_count ?? 0} 跳过 · ${fmtDuration(r.duration_sec)} · ${fmtTimeShort(r.created_at)}`
+              el("span", null, `+${r.downloaded_count ?? 0} 新增`),
+              el("span", null, "·"),
+              el("span", null, `${r.skipped_count ?? 0} 跳过`),
+              el("span", null, "·"),
+              el("span", null, fmtDuration(r.duration_sec)),
+              el("span", null, "·"),
+              el("span", null, fmtTimeShort(r.created_at))
             )
           )
         );
@@ -322,35 +336,35 @@ export async function renderActivity(container, _route, ctx) {
     }
     rightCol.appendChild(recentCard);
 
-    // Site health card
+    // Site health
     if (siteHealth.length) {
-      const shCard = el(
-        "section",
-        { class: "fl-card stack sm-gap" },
+      rightCol.appendChild(
         el(
-          "div",
-          { class: "row-actions between" },
-          el("h2", { class: "fl-card-title", style: { margin: 0 } }, "站点凭据健康状态"),
-          el("a", { class: "fl-btn subtle xs", href: "#sites" }, "站点配置 →")
-        ),
-        el(
-          "div",
-          { class: "row-actions", style: { gap: "0.45rem", flexWrap: "wrap" } },
-          ...siteHealth.slice(0, 8).map((s) =>
-            el(
-              "a",
-              { class: "fl-btn sm", href: `#site/${encodeURIComponent(s.site)}` },
-              el("span", { class: `health-dot ${s.health || "unknown"}` }),
-              el("span", null, SITE_LABELS[s.site] || s.site),
-              healthBadge(s.health)
+          "section",
+          { class: "fl-card stack" },
+          cardHead("站点凭据健康状态", {
+            iconName: "shield",
+            subtitle: "Cookie 与登录态的最新探测结果",
+            actions: [el("a", { class: "fl-btn subtle xs", href: "#sites" }, "站点配置", icon("chevron-right", 13))],
+          }),
+          el(
+            "div",
+            { class: "site-health-grid" },
+            ...siteHealth.slice(0, 8).map((s) =>
+              el(
+                "a",
+                { class: "site-health-chip", href: `#site/${encodeURIComponent(s.site)}` },
+                el("span", { class: `health-dot ${s.health || "unknown"}` }),
+                el("span", null, SITE_LABELS[s.site] || s.site),
+                healthBadge(s.health)
+              )
             )
           )
         )
       );
-      rightCol.appendChild(shCard);
     }
 
-    page.appendChild(el("div", { class: "two-col" }, leftCol, rightCol));
+    page.appendChild(el("div", { class: "dashboard-grid" }, leftCol, rightCol));
     container.replaceChildren(page);
   }
 
@@ -360,6 +374,7 @@ export async function renderActivity(container, _route, ctx) {
     if (!destroyed) loadAndRender().catch(() => {});
   };
   const unsubs = [
+    events.on("scheduler", onEvt),
     events.on("run_queued", onEvt),
     events.on("run_started", onEvt),
     events.on("run_finished", onEvt),

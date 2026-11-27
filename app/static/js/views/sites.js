@@ -1,6 +1,8 @@
 import { api } from "../api.js";
-import { el, healthBadge, toast, SITE_LABELS, SITE_DOMAINS, fmtTimeShort } from "../util.js";
+import { el, healthBadge, toast, positionPopoverFallback, SITE_LABELS, SITE_DOMAINS, fmtTimeShort } from "../util.js";
 import { navigate } from "../router.js";
+import { pageHead, infoBar, emptyState } from "../ui.js";
+import { icon } from "../icons.js";
 
 export async function renderSites(container) {
   const [healthRes, overviewRes, syncRes] = await Promise.all([
@@ -24,14 +26,12 @@ export async function renderSites(container) {
     }
   }
 
-  const allKeys = new Set([
-    ...Object.keys(healthMap),
-    ...Object.keys(SITE_LABELS),
-  ]);
+  const allKeys = new Set([...Object.keys(healthMap), ...Object.keys(SITE_LABELS)]);
 
   let searchQuery = "";
   let onlyConfigured = false;
   const gridEl = el("div", { class: "sites-grid" });
+  const countEl = el("span", { class: "muted xs", style: { marginInlineStart: "auto", whiteSpace: "nowrap" } });
 
   function renderGrid() {
     gridEl.innerHTML = "";
@@ -60,8 +60,17 @@ export async function renderSites(container) {
         return a.localeCompare(b);
       });
 
+    const configuredCount = entries.filter((k) => healthMap[k]?.configured).length;
+    countEl.textContent = `${entries.length} 个站点 · ${configuredCount} 个已配置`;
+
     if (!entries.length) {
-      gridEl.appendChild(el("div", { class: "fl-card empty-state" }, "没有匹配的站点配置"));
+      gridEl.appendChild(
+        el(
+          "div",
+          { class: "fl-card", style: { gridColumn: "1 / -1" } },
+          emptyState("调整关键字或关闭「仅显示已配置」后重试", "globe", "没有匹配的站点")
+        )
+      );
       return;
     }
 
@@ -73,78 +82,151 @@ export async function renderSites(container) {
       const authCount = Array.isArray(info.auth_fields) ? info.auth_fields.length : 0;
       const hasCreds = Boolean(info.has_credentials || cookieCount > 0 || authCount > 0);
       const taskCount = Array.isArray(info.task_ids) ? info.task_ids.length : 0;
+      const label = SITE_LABELS[key] || key;
+      const initial = (label || key).trim().charAt(0).toUpperCase() || "?";
 
       gridEl.appendChild(
         el(
-          "article",
-          { class: "fl-card stack sm-gap" },
+          "a",
+          { class: "site-card", href: `#site/${encodeURIComponent(key)}` },
           el(
             "div",
-            { class: "row-actions between" },
+            { class: "site-card-top" },
+            el("span", { class: `site-icon ${health === "error" ? "error" : health === "warn" ? "warn" : health === "ok" ? "ok" : ""}`.trim() }, initial),
             el(
               "div",
-              { class: "row-actions xs-gap" },
-              el("span", { class: `health-dot ${health}` }),
-              el("strong", { style: { fontSize: "0.96rem" } }, SITE_LABELS[key] || key)
+              { class: "stack xs-gap", style: { minWidth: 0, flex: 1 } },
+              el(
+                "div",
+                { class: "site-card-title" },
+                el("span", { class: `health-dot ${health}` }),
+                el("span", { class: "site-name" }, label)
+              ),
+              el("div", { class: "site-domain", title: domains || `extractor.${key}` }, domains || `extractor.${key}`)
             ),
             healthBadge(health, info.configured ? (health === "unknown" ? "已配置" : undefined) : "未配置")
           ),
-          el("div", { class: "muted xs" }, domains || `extractor.${key}`),
           el(
             "div",
-            { class: "row-actions xs-gap", style: { flexWrap: "wrap" } },
+            { class: "site-meta" },
             cookieCount > 0
               ? el("span", { class: "fl-badge info" }, `${cookieCount} 项 Cookie`)
               : hasCreds
-                ? el("span", { class: "fl-badge info" }, "已配账密/Key")
+                ? el("span", { class: "fl-badge info" }, "已配账密 / Key")
                 : el("span", { class: "fl-badge neutral" }, "无独立凭据"),
             info.postprocess_enabled ? el("span", { class: "fl-badge ok" }, "ExifTool 开启") : null,
-            taskCount > 0 ? el("span", { class: "fl-badge neutral" }, `${taskCount} 个关联任务`) : null,
-            info.skip ? el("span", { class: "fl-badge neutral" }, `Skip: ${info.skip}`) : null
+            taskCount > 0 ? el("span", { class: "fl-badge" }, `${taskCount} 个关联任务`) : null,
+            info.skip ? el("span", { class: "fl-badge neutral", title: `Skip: ${info.skip}` }, `Skip: ${info.skip}`) : null
           ),
-          info.last_auth_error_summary
-            ? el("div", { class: "fl-badge err", style: { alignSelf: "flex-start" } }, info.last_auth_error_summary)
-            : info.last_run_at
-              ? el("div", { class: "muted xs" }, `最近运行：${fmtTimeShort(info.last_run_at)}`)
-              : null,
           el(
             "div",
-            { class: "row-actions", style: { marginTop: "auto", paddingTop: "0.25rem", justifyContent: "flex-end" } },
-            el(
-              "a",
-              { class: "fl-btn sm", href: `#site/${encodeURIComponent(key)}` },
-              info.configured ? "编辑站点配置 →" : "初始化配置 →"
-            )
+            { class: "site-card-foot" },
+            info.last_auth_error_summary
+              ? el("span", { class: "text-danger truncate", title: info.last_auth_error_summary }, info.last_auth_error_summary)
+              : el(
+                  "span",
+                  { class: "truncate" },
+                  info.last_run_at ? `最近运行：${fmtTimeShort(info.last_run_at)}` : "尚未产生运行记录"
+                ),
+            el("span", { class: "site-open" }, info.configured ? "编辑配置" : "初始化配置", icon("chevron-right", 13))
           )
         )
       );
     }
   }
 
-  const customSiteInput = el("input", {
+  const addSiteBtn = el(
+    "button",
+    {
+      type: "button",
+      class: "fl-btn accent sm",
+      popovertarget: "add-site-popover",
+      style: { anchorName: "--gdl-add-site" },
+    },
+    icon("plus", 14),
+    el("span", null, "添加自定义站点")
+  );
+
+  const addSiteInput = el("input", {
     type: "text",
-    placeholder: "输入自定义 extractor 名，如 bluesky / mastodon",
-    style: { minInlineSize: "220px" },
+    placeholder: "如 mastodon、kemono…",
+    "aria-label": "自定义站点 extractor 名称",
+    autocomplete: "off",
+  });
+
+  const addSitePopover = el(
+    "div",
+    {
+      id: "add-site-popover",
+      popover: "auto",
+      class: "fl-flyout site-add-popover",
+    },
+    el(
+      "form",
+      {
+        class: "stack sm-gap",
+        onSubmit: (e) => {
+          e.preventDefault();
+          const name = addSiteInput.value.trim().toLowerCase();
+          if (!name) {
+            toast("请输入 gallery-dl extractor 名称", "danger");
+            addSiteInput.focus();
+            return;
+          }
+          if (!/^[a-z0-9][a-z0-9._-]*$/i.test(name)) {
+            toast("extractor 名称仅支持字母、数字、点、下划线和连字符", "danger");
+            addSiteInput.focus();
+            return;
+          }
+          addSiteInput.value = "";
+          addSitePopover.hidePopover?.();
+          navigate(`#site/${encodeURIComponent(name)}`);
+        },
+      },
+      el(
+        "div",
+        { class: "stack xs-gap" },
+        el("div", { class: "site-add-popover-title" }, "打开 / 新建自定义站点"),
+        el("span", { class: "hint" }, "输入 gallery-dl 支持的 extractor 名称")
+      ),
+      addSiteInput,
+      el(
+        "div",
+        { class: "site-add-popover-foot" },
+        el(
+          "button",
+          {
+            type: "button",
+            class: "fl-btn sm",
+            onClick: () => addSitePopover.hidePopover?.(),
+          },
+          el("span", null, "取消")
+        ),
+        el("button", { type: "submit", class: "fl-btn accent sm" }, el("span", null, "打开配置"))
+      )
+    )
+  );
+
+  addSitePopover.addEventListener("toggle", (e) => {
+    if (e.newState === "open") {
+      positionPopoverFallback(addSitePopover, addSiteBtn);
+      requestAnimationFrame(() => {
+        addSiteInput.focus();
+        addSiteInput.select();
+      });
+    }
   });
 
   const twitterCard = syncRes
-    ? el(
-        "div",
-        { class: "fl-infobar info", style: { justifyContent: "space-between" } },
-        el(
-          "div",
-          null,
-          el("strong", { class: "sm" }, "Twitter / X 永久红心历史同步服务"),
-          el(
-            "div",
-            { class: "xs muted" },
-            syncRes.token
-              ? `同步令牌已就绪 · 已归档 ${syncRes.count ?? 0} 条推文 ID（Archive ${syncRes.sources?.archive_sqlite ?? 0} / 磁盘 ${syncRes.sources?.disk ?? 0} / like.js ${syncRes.sources?.archive_js ?? 0} / 浏览器 ${syncRes.sources?.browser ?? 0}）`
-              : "进入 Twitter 站点配置可获取同步令牌与一键油猴脚本"
-          )
-        ),
-        el("a", { class: "fl-btn sm", href: "#site/twitter" }, "管理 Twitter 同步 →")
-      )
+    ? infoBar({
+        tone: "info",
+        iconName: "activity",
+        title: "Twitter / X 永久红心历史同步服务",
+        body: syncRes.token
+          ? `同步令牌已就绪 · 已归档 ${syncRes.count ?? 0} 条推文 ID（Archive ${syncRes.sources?.archive_sqlite ?? 0} / 磁盘 ${syncRes.sources?.disk ?? 0} / like.js ${syncRes.sources?.archive_js ?? 0} / 浏览器 ${syncRes.sources?.browser ?? 0}）`
+          : "进入 Twitter 站点配置可获取同步令牌与一键油猴脚本",
+        actions: [el("a", { class: "fl-btn sm", href: "#site/twitter" }, "管理同步", icon("chevron-right", 13))],
+      })
     : null;
 
   renderGrid();
@@ -152,51 +234,31 @@ export async function renderSites(container) {
   container.replaceChildren(
     el(
       "div",
-      { class: "stack" },
-      el(
-        "div",
-        { class: "row-actions between" },
-        el(
-          "div",
-          null,
-          el("h1", { class: "fl-page-title", style: { margin: 0, fontSize: "1.35rem" } }, "站点与凭据"),
-          el("div", { class: "muted xs" }, "管理各站 Cookie、账号秘钥、Skip 覆盖与 ExifTool 后处理规则")
-        ),
-        el(
-          "div",
-          { class: "row-actions" },
-          customSiteInput,
-          el(
-            "button",
-            {
-              type: "button",
-              class: "fl-btn sm",
-              onClick: () => {
-                const name = customSiteInput.value.trim().toLowerCase();
-                if (!name) {
-                  toast("请输入 gallery-dl extractor 名称", "danger");
-                  return;
-                }
-                navigate(`#site/${encodeURIComponent(name)}`);
-              },
-            },
-            "打开/新建站点"
-          )
-        )
-      ),
+      { class: "page-body" },
+      pageHead({
+        eyebrow: "Sites & credentials",
+        title: "站点与凭据",
+        subtitle: "管理各站 Cookie、账号秘钥、Skip 覆盖与 ExifTool 后处理规则",
+        actions: [addSiteBtn, addSitePopover],
+      }),
       twitterCard,
       el(
         "div",
-        { class: "fl-card row-actions between" },
-        el("input", {
-          type: "search",
-          style: { flex: 1, minInlineSize: "200px" },
-          placeholder: "搜索站点名称或域名 (如 x.com, fanbox, patreon, pixiv)…",
-          onInput: (e) => {
-            searchQuery = e.target.value.trim().toLowerCase();
-            renderGrid();
-          },
-        }),
+        { class: "fl-card row-actions", style: { padding: "10px 12px" } },
+        el(
+          "div",
+          { class: "search-box" },
+          icon("search", 15),
+          el("input", {
+            type: "search",
+            placeholder: "搜索站点名称或域名，如 x.com、fanbox、patreon、pixiv…",
+            "aria-label": "搜索站点",
+            onInput: (e) => {
+              searchQuery = e.target.value.trim().toLowerCase();
+              renderGrid();
+            },
+          })
+        ),
         el(
           "label",
           { class: "switch-inline" },
@@ -209,8 +271,9 @@ export async function renderSites(container) {
               renderGrid();
             },
           }),
-          el("span", null, "仅显示已有配置的站点")
-        )
+          el("span", null, "仅显示已配置的站点")
+        ),
+        countEl
       ),
       gridEl
     )
