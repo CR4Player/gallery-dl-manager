@@ -1,81 +1,75 @@
-/** Global SSE event bus with exponential backoff and polling fallback. */
+/**
+ * Singleton SSE manager for /api/events.
+ */
+const EVENT_NAMES = [
+  "hello",
+  "scheduler",
+  "config_changed",
+  "run_queued",
+  "run_started",
+  "run_finished",
+  "tasks_changed",
+  "alerts_changed",
+];
 
-const listeners = new Set();
-let es = null;
-let retryDelayMs = 1000;
-let consecutiveFailures = 0;
-let reconnectTimer = null;
-let fallbackPollTimer = null;
-
-function dispatch(ev) {
-  for (const fn of listeners) {
-    try {
-      fn(ev);
-    } catch {}
-  }
-}
-
-function startFallbackPolling() {
-  if (fallbackPollTimer) return;
-  fallbackPollTimer = setInterval(() => {
-    dispatch({ type: "poll_tick" });
-  }, 15000);
-}
-
-function stopFallbackPolling() {
-  if (!fallbackPollTimer) return;
-  clearInterval(fallbackPollTimer);
-  fallbackPollTimer = null;
-}
-
-function connect() {
-  if (es) {
-    es.close();
-    es = null;
-  }
-  try {
-    es = new EventSource("/api/events");
-  } catch {
-    startFallbackPolling();
-    return;
+class EventBus {
+  constructor() {
+    this.es = null;
+    this.listeners = new Map();
+    this.started = false;
   }
 
-  es.onopen = () => {
-    consecutiveFailures = 0;
-    retryDelayMs = 1000;
-    stopFallbackPolling();
-  };
+  start() {
+    if (this.started || typeof EventSource === "undefined") return;
+    this.started = true;
+    const es = new EventSource("/api/events");
+    this.es = es;
 
-  es.onmessage = (msgEv) => {
-    consecutiveFailures = 0;
-    retryDelayMs = 1000;
-    stopFallbackPolling();
-    try {
-      const data = JSON.parse(msgEv.data);
-      dispatch(data);
-    } catch {}
-  };
-
-  es.onerror = () => {
-    if (es) {
-      es.close();
-      es = null;
+    for (const type of EVENT_NAMES) {
+      es.addEventListener(type, (ev) => {
+        let payload = null;
+        if (ev.data) {
+          try {
+            payload = JSON.parse(ev.data);
+          } catch {
+            payload = ev.data;
+          }
+        }
+        this.emit(type, payload);
+        this.emit("*", { type, payload });
+      });
     }
-    consecutiveFailures += 1;
-    if (consecutiveFailures >= 3) {
-      startFallbackPolling();
+
+    es.onerror = () => {
+      // Browser EventSource handles backoff automatically unless closed.
+    };
+  }
+
+  stop() {
+    if (this.es) {
+      this.es.close();
+      this.es = null;
     }
-    clearTimeout(reconnectTimer);
-    reconnectTimer = setTimeout(connect, retryDelayMs);
-    retryDelayMs = Math.min(30000, retryDelayMs * 2);
-  };
+    this.started = false;
+  }
+
+  on(type, fn) {
+    if (!this.listeners.has(type)) this.listeners.set(type, new Set());
+    this.listeners.get(type).add(fn);
+    return () => this.listeners.get(type)?.delete(fn);
+  }
+
+  emit(type, payload) {
+    const set = this.listeners.get(type);
+    if (!set) return;
+    for (const fn of [...set]) {
+      try {
+        fn(payload);
+      } catch (err) {
+        console.error(`[events:${type}]`, err);
+      }
+    }
+  }
 }
 
-export function startEvents() {
-  connect();
-}
-
-export function onGlobalEvent(fn) {
-  listeners.add(fn);
-  return () => listeners.delete(fn);
-}
+export const events = new EventBus();

@@ -1,112 +1,199 @@
-import { getSitesHealth } from "../api.js";
-import { esc, fmtRelativePast, healthBadge, statusBadge } from "../util.js";
+import { api } from "../api.js";
+import { el, healthBadge, toast, SITE_LABELS, SITE_DOMAINS } from "../util.js";
+import { navigate } from "../router.js";
 
-let hostEl = null;
-let unmounted = false;
+export async function renderSites(container) {
+  const [overview, healthRes, syncRes] = await Promise.all([
+    api.get("/api/config/overview").catch(() => null),
+    api.get("/api/sites/health").catch(() => null),
+    api.get("/api/twitter-sync/status").catch(() => null),
+  ]);
 
-async function renderSites() {
-  if (unmounted || !hostEl) return;
-  const sites = await getSitesHealth(true);
-  if (unmounted || !hostEl) return;
-
-  const cardsHtml = sites.length
-    ? sites
-        .map((s) => {
-          const authSummary = (s.auth_fields || [])
-            .map((a) => `<code>${esc(a.key)}=${esc(a.masked)}</code>`)
-            .join(" ");
-          const cookieChips = (s.cookie_keys || [])
-            .slice(0, 6)
-            .map((k) => `<span class="ov-source-tag">${esc(k)}</span>`)
-            .join("");
-          const taskLinks = (s.task_ids || [])
-            .map((tid, idx) => `<a class="badge" href="#/tasks/${tid}">${esc(s.task_names?.[idx] || `#${tid}`)}</a>`)
-            .join(" ");
-
-          return `
-        <article class="card site-card">
-          <div class="stack sm-gap">
-            <div class="row-actions between">
-              <div class="row-actions">
-                <strong style="font-size:1.08rem;">${esc(s.site)}</strong>
-                ${healthBadge(s.health)}
-              </div>
-              ${!s.configured ? `<span class="badge">未建配置</span>` : ""}
-            </div>
-
-            <div class="muted xs">域名：${(s.domains || []).map((d) => `<code>${esc(d)}</code>`).join(" · ")}</div>
-
-            ${s.health === "error" ? `
-              <div class="notice danger sm">
-                最近认证失效（${fmtRelativePast(s.last_auth_error_at)}）：${esc(s.last_auth_error_summary || "Cookie 已过期")}
-              </div>` : ""}
-
-            <div class="stack xs-gap sm">
-              <div>
-                <span class="muted">Cookies：</span>
-                <strong>${s.cookie_count} 项</strong>
-                ${cookieChips ? `<div class="cookie-chips" style="margin-top:0.25rem;">${cookieChips}${s.cookie_keys.length > 6 ? `<span class="muted xs">+${s.cookie_keys.length - 6}</span>` : ""}</div>` : ""}
-              </div>
-              <div>
-                <span class="muted">其他凭据：</span>
-                ${authSummary || `<span class="muted">无</span>`}
-              </div>
-              <div>
-                <span class="muted">ExifTool 后处理：</span>
-                ${s.postprocess_enabled
-                  ? `<span class="badge success">${s.postprocess_config?.mode === "custom" ? "自定义" : "内置"}</span>`
-                  : `<span class="muted">未开启</span>`}
-              </div>
-              <div>
-                <span class="muted">关联任务：</span>
-                ${taskLinks || `<span class="muted">暂无关联任务</span>`}
-              </div>
-              ${s.last_run_at ? `
-                <div class="row-actions" style="gap:0.4rem;">
-                  <span class="muted">最近运行：</span>
-                  ${statusBadge(s.last_status)}
-                  <a class="xs" href="#/runs/${s.last_run_id}">#${s.last_run_id} (${fmtRelativePast(s.last_run_at)})</a>
-                </div>` : ""}
-            </div>
-          </div>
-
-          <div class="row-actions between" style="padding-top:0.4rem; border-top:1px solid var(--border);">
-            <a class="btn ${s.health === "error" ? "danger" : "primary"} sm" href="#/sites/${encodeURIComponent(s.site)}">${s.health === "error" ? "更新 Cookie" : "编辑配置与凭据"}</a>
-            ${s.last_auth_error_run_id ? `<a class="btn ghost sm" href="#/runs/${s.last_auth_error_run_id}">错误日志</a>` : ""}
-          </div>
-        </article>`;
-        })
-        .join("")
-    : `<div class="card muted">暂无站点配置。点击右上角「＋ 添加站点」开始配置 Cookie 或认证凭据。</div>`;
-
-  hostEl.innerHTML = `
-    <div class="page-head">
-      <div>
-        <h1>站点与凭据健康</h1>
-        <p class="muted sm" style="margin:0.2rem 0 0;">集中查看各站点 Cookie 状态、最近认证失败记录与关联的定时任务</p>
-      </div>
-      <div class="row-actions">
-        <a class="btn primary" href="#/sites/new">＋ 添加站点</a>
-      </div>
-    </div>
-    <div class="sites-grid">${cardsHtml}</div>
-  `;
-}
-
-export async function mount(el) {
-  unmounted = false;
-  hostEl = el;
-  el.innerHTML = `<div class="notice muted">正在加载站点健康状态…</div>`;
-  await renderSites();
-}
-
-export function onEvent(ev) {
-  if (["config_changed", "run_finished", "tasks_changed", "poll_tick"].includes(ev.type)) {
-    renderSites().catch(() => {});
+  const configuredSites = overview?.sites || overview?.extractors || {};
+  const healthMap = {};
+  const hList = healthRes?.sites || healthRes?.items || [];
+  if (Array.isArray(hList)) {
+    for (const item of hList) {
+      if (item.site) healthMap[item.site] = item;
+    }
+  } else if (healthRes && typeof healthRes === "object") {
+    Object.assign(healthMap, healthRes);
   }
-}
 
-export function unmount() {
-  unmounted = true;
-  hostEl = null;
+  const allKeys = new Set([
+    ...Object.keys(SITE_LABELS),
+    ...Object.keys(configuredSites),
+    ...Object.keys(healthMap),
+  ]);
+
+  let searchQuery = "";
+  let onlyConfigured = false;
+
+  const gridEl = el("div", { class: "sites-grid" });
+
+  function renderGrid() {
+    gridEl.innerHTML = "";
+    const entries = [...allKeys]
+      .filter((key) => {
+        const cfg = configuredSites[key];
+        const isConfigured = Boolean(cfg && Object.keys(cfg).length);
+        if (onlyConfigured && !isConfigured) return false;
+        if (searchQuery) {
+          const domains = (SITE_DOMAINS[key] || []).join(" ");
+          const label = SITE_LABELS[key] || "";
+          if (!`${key} ${label} ${domains}`.toLowerCase().includes(searchQuery)) return false;
+        }
+        return true;
+      })
+      .sort((a, b) => {
+        const ca = configuredSites[a] ? 1 : 0;
+        const cb = configuredSites[b] ? 1 : 0;
+        if (ca !== cb) return cb - ca;
+        return a.localeCompare(b);
+      });
+
+    if (!entries.length) {
+      gridEl.appendChild(el("div", { class: "fl-card empty-state" }, "没有匹配的站点配置"));
+      return;
+    }
+
+    for (const key of entries) {
+      const cfg = configuredSites[key] || {};
+      const h = healthMap[key] || {};
+      const health = h.health || (Object.keys(cfg).length ? "ok" : "unknown");
+      const domains = (SITE_DOMAINS[key] || []).slice(0, 3).join(", ");
+      const hasCookies = Boolean(cfg.cookies || cfg["cookies-from-browser"] || cfg.username || cfg.token || cfg["refresh-token"]);
+
+      gridEl.appendChild(
+        el(
+          "article",
+          { class: "fl-card stack sm-gap" },
+          el(
+            "div",
+            { class: "row-actions between" },
+            el(
+              "div",
+              { class: "row-actions xs-gap" },
+              el("span", { class: `health-dot ${health}` }),
+              el("strong", { style: { fontSize: "0.96rem" } }, SITE_LABELS[key] || key)
+            ),
+            healthBadge(health, h.label || undefined)
+          ),
+          el("div", { class: "muted xs" }, domains || `extractor.${key}`),
+          el(
+            "div",
+            { class: "row-actions xs-gap", style: { flexWrap: "wrap" } },
+            hasCookies ? el("span", { class: "fl-badge info" }, "已配凭据") : el("span", { class: "fl-badge neutral" }, "无独立凭据"),
+            cfg.proxy !== undefined ? el("span", { class: "fl-badge neutral" }, "独立代理") : null,
+            cfg.postprocessors ? el("span", { class: "fl-badge neutral" }, "后处理覆盖") : null
+          ),
+          h.message ? el("div", { class: "muted xs" }, h.message) : null,
+          el(
+            "div",
+            { class: "row-actions", style: { marginTop: "auto", paddingTop: "0.25rem", justifyContent: "flex-end" } },
+            el(
+              "a",
+              { class: "fl-btn sm", href: `#site/${encodeURIComponent(key)}` },
+              Object.keys(cfg).length ? "编辑站点配置 →" : "初始化配置 →"
+            )
+          )
+        )
+      );
+    }
+  }
+
+  const customSiteInput = el("input", {
+    type: "text",
+    placeholder: "输入自定义 extractor 名，如 bluesky / mastodon",
+    style: { minInlineSize: "220px" },
+  });
+
+  const twitterCard = syncRes
+    ? el(
+        "div",
+        { class: "fl-infobar info", style: { justifyContent: "space-between" } },
+        el(
+          "div",
+          null,
+          el("strong", { class: "sm" }, "Twitter / X Cookie 无感同步服务"),
+          el(
+            "div",
+            { class: "xs muted" },
+            syncRes.token_configured
+              ? `已就绪 · 最近同步: ${syncRes.last_sync_at || "尚未上报"}`
+              : "尚未生成同步令牌，进入 Twitter 站点详情或设置页可一键生成并安装油猴脚本"
+          )
+        ),
+        el("a", { class: "fl-btn sm", href: "#site/twitter" }, "管理 Twitter 同步 →")
+      )
+    : null;
+
+  renderGrid();
+
+  container.replaceChildren(
+    el(
+      "div",
+      { class: "stack" },
+      el(
+        "div",
+        { class: "row-actions between" },
+        el(
+          "div",
+          null,
+          el("h1", { class: "fl-page-title", style: { margin: 0, fontSize: "1.35rem" } }, "站点与凭据"),
+          el("div", { class: "muted xs" }, "管理各站 Cookie、OAuth Token、独立代理、限速与后处理覆盖规则")
+        ),
+        el(
+          "div",
+          { class: "row-actions" },
+          customSiteInput,
+          el(
+            "button",
+            {
+              type: "button",
+              class: "fl-btn sm",
+              onClick: () => {
+                const name = customSiteInput.value.trim().toLowerCase();
+                if (!name) {
+                  toast("请输入 gallery-dl extractor 名称", "danger");
+                  return;
+                }
+                navigate(`#site/${encodeURIComponent(name)}`);
+              },
+            },
+            "打开/新建站点"
+          )
+        )
+      ),
+      twitterCard,
+      el(
+        "div",
+        { class: "fl-card row-actions between" },
+        el("input", {
+          type: "search",
+          style: { flex: 1, minInlineSize: "200px" },
+          placeholder: "搜索站点名称或域名 (如 x.com, pixiv, fanbox)…",
+          onInput: (e) => {
+            searchQuery = e.target.value.trim().toLowerCase();
+            renderGrid();
+          },
+        }),
+        el(
+          "label",
+          { class: "switch-inline" },
+          el("input", {
+            type: "checkbox",
+            role: "switch",
+            switch: true,
+            onChange: (e) => {
+              onlyConfigured = e.target.checked;
+              renderGrid();
+            },
+          }),
+          el("span", null, "仅显示已有覆盖配置的站点")
+        )
+      ),
+      gridEl
+    )
+  );
 }

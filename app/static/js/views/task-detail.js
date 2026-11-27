@@ -1,495 +1,275 @@
-import { api, getSitesHealth } from "../api.js";
-import { mountDownloadOptions } from "../components/download-options.js";
-import { navigate } from "../router.js";
+import { api } from "../api.js";
 import {
-  confirmDialog,
-  debounce,
-  esc,
-  fmtDuration,
-  fmtTime,
-  HAS_NATIVE_SWITCH,
-  healthBadge,
-  showToast,
+  el,
+  toast,
+  confirmModal,
   statusBadge,
-  upgradeSwitches,
+  fmtTimeShort,
+  fmtDuration,
+  relTime,
+  debounce,
 } from "../util.js";
+import { navigate } from "../router.js";
+import { createDownloadOptions } from "../components/download-options.js";
 
-let hostEl = null;
-let unmounted = false;
-let optionsApi = null;
-let currentTaskId = null;
-let activeTab = "overview";
+export async function renderTaskDetail(container, route, ctx) {
+  const taskId = route.id;
 
-const CRON_PRESETS = [
-  { label: "每小时", expr: "0 * * * *" },
-  { label: "每 6 小时", expr: "0 */6 * * *" },
-  { label: "每天 03:00", expr: "0 3 * * *" },
-  { label: "每周日 04:00", expr: "0 4 * * 0" },
-];
-
-async function loadTaskDetailFallback(taskId) {
-  const [listRes, runsRes] = await Promise.all([
-    api("/api/tasks"),
-    api(`/api/runs?task_id=${taskId}&limit=30`),
+  const [detailRes, tasksRes, runsRes, inputsRes, overviewRes] = await Promise.all([
+    api.get(`/api/tasks/${encodeURIComponent(taskId)}`).catch(() => null),
+    api.get("/api/tasks").catch(() => null),
+    api.get(`/api/runs?task_id=${encodeURIComponent(taskId)}&limit=12`).catch(() => null),
+    api.get("/api/inputs").catch(() => null),
+    api.get("/api/config/overview").catch(() => null),
   ]);
-  const task = (listRes.tasks || []).find((t) => Number(t.id) === Number(taskId));
-  if (!task) throw new Error("任务不存在");
-  const runs = runsRes.runs || [];
-  const total = runs.length;
-  const success = runs.filter((r) => r.status === "success").length;
-  const finished = runs.filter((r) => !["queued", "running"].includes(r.status)).length;
-  const durs = runs.map((r) => r.duration_sec).filter((d) => d != null);
-  return {
-    task,
-    recent_runs: runs,
-    sites: task.sites || [],
-    health: {
-      total,
-      success,
-      success_rate: finished > 0 ? success / finished : null,
-      avg_duration_sec: durs.length ? durs.reduce((a, b) => a + Number(b), 0) / durs.length : null,
-      total_downloaded: runs.reduce((acc, r) => acc + Number(r.downloaded_count || 0), 0),
+
+  const list = tasksRes?.tasks || tasksRes?.items || (Array.isArray(tasksRes) ? tasksRes : []);
+  const task = detailRes?.task || detailRes || list.find((t) => String(t.id) === String(taskId));
+
+  if (!task) {
+    container.replaceChildren(
+      el(
+        "div",
+        { class: "fl-card stack", style: { textAlign: "center", padding: "2rem" } },
+        el("strong", null, `未找到定时任务 #${taskId}`),
+        el("a", { class: "fl-btn sm", href: "#tasks", style: { alignSelf: "center" } }, "返回定时任务列表")
+      )
+    );
+    return;
+  }
+
+  const inputs = inputsRes?.files || inputsRes?.items || (Array.isArray(inputsRes) ? inputsRes : []);
+  const taskRuns = runsRes?.runs || runsRes?.items || task.recent_runs || [];
+
+  const nameIn = el("input", { type: "text", required: true, value: task.name || "" });
+  const cronIn = el("input", { type: "text", required: true, value: task.cron_expr || "" });
+  const cronHint = el("div", { class: "muted xs" }, task.next_run_at ? `当前下次执行: ${relTime(task.next_run_at)}` : "");
+  const enabledIn = el("input", { type: "checkbox", role: "switch", switch: true, checked: Boolean(task.enabled) });
+  const urlsIn = el("textarea", {
+    rows: 4,
+    value: Array.isArray(task.urls) ? task.urls.join("\n") : task.urls || "",
+    placeholder: "每行一个 URL",
+  });
+  const inputSel = el(
+    "select",
+    null,
+    el("option", { value: "" }, "不使用 NAS 链接文件"),
+    ...inputs.map((f) => {
+      const fn = typeof f === "string" ? f : f.filename || f.name;
+      return fn ? el("option", { value: fn, selected: fn === task.input_file }, fn) : null;
+    })
+  );
+
+  const optCtrl = createDownloadOptions({
+    initial: {
+      proxy_mode: task.proxy_mode,
+      proxy_url: task.proxy_url,
+      skip_mode: task.skip_mode,
+      skip_value: task.skip_value,
+      sleep_request: task.sleep_request,
+      output_subdir: task.output_subdir,
+      filename: task.filename,
+      extra_args: task.extra_args,
+      archive_enabled: task.archive_enabled,
+      archive_backfill: task.archive_backfill,
+      postprocess_mode: task.postprocess_mode,
     },
-  };
-}
-
-async function fetchInputOptions(selected = "") {
-  const sel = document.getElementById("td-input-file");
-  if (!sel) return;
-  try {
-    const res = await api("/api/inputs");
-    const files = res.files || [];
-    if (!files.length) {
-      sel.innerHTML = `<option value="">(暂无文件，请先上传或放入 /data/inputs/)</option>`;
-      return;
-    }
-    sel.innerHTML = files.map((f) => `<option value="${esc(f.name)}">${esc(f.name)} (${f.url_count} 条 URL)</option>`).join("");
-    if (selected && files.some((f) => f.name === selected)) {
-      sel.value = selected;
-    }
-  } catch {}
-}
-
-async function previewCronExpr() {
-  const box = document.getElementById("td-cron-preview");
-  const expr = document.getElementById("td-cron")?.value.trim() || "";
-  if (!box) return;
-  try {
-    const res = await api("/api/cron/preview", { method: "POST", body: { cron_expr: expr } });
-    box.className = "notice info sm";
-    box.innerHTML = `<strong>${esc(res.description)}</strong> · 未来 3 次：${(res.next_runs || []).map(esc).join(" | ")}`;
-  } catch (err) {
-    box.className = "notice danger sm";
-    box.textContent = err.message;
-  }
-}
-
-function syncSourceMode() {
-  const mode = document.getElementById("td-source-mode")?.value || "urls";
-  document.getElementById("td-urls-wrap")?.classList.toggle("hidden", mode !== "urls");
-  document.getElementById("td-input-wrap")?.classList.toggle("hidden", mode !== "input_file");
-}
-
-function renderSettingsForm(task = null) {
-  const isNew = !task;
-  const srcMode = task?.input_file ? "input_file" : "urls";
-  return `
-    <form id="task-edit-form" class="card stack" novalidate>
-      <div class="form-grid-2">
-        <div class="field">
-          <div class="label-row">
-            <label for="td-name">任务名称</label>
-            <span class="hint">必填</span>
-          </div>
-          <input id="td-name" type="text" required value="${esc(task?.name || "")}" placeholder="例如 Twitter 点赞">
-        </div>
-        <div class="field">
-          <div class="label-row">
-            <label for="td-cron">Cron 表达式 (5 段)</label>
-            <span class="hint">分 时 日 月 周</span>
-          </div>
-          <input id="td-cron" type="text" required value="${esc(task?.cron_expr || "0 */6 * * *")}">
-        </div>
-      </div>
-
-      <div class="row-actions">
-        <span class="hint">快捷周期：</span>
-        ${CRON_PRESETS.map((p) => `<button type="button" class="chip-btn" data-cron-preset="${esc(p.expr)}">${esc(p.label)}</button>`).join("")}
-      </div>
-      <div id="td-cron-preview" class="notice info sm">正在计算调度时间…</div>
-
-      <div class="field">
-        <label for="td-source-mode">抓取来源</label>
-        <select id="td-source-mode">
-          <option value="urls" ${srcMode === "urls" ? "selected" : ""}>直接填写 URL 列表</option>
-          <option value="input_file" ${srcMode === "input_file" ? "selected" : ""}>NAS 输入文件 (/data/inputs/*.txt)</option>
-        </select>
-      </div>
-
-      <div class="field ${srcMode === "urls" ? "" : "hidden"}" id="td-urls-wrap">
-        <label for="td-urls">抓取 URL（每行一个）</label>
-        <textarea id="td-urls" rows="4" placeholder="https://x.com/...">${esc((task?.urls || []).join("\n"))}</textarea>
-      </div>
-
-      <div class="sub-panel stack sm-gap ${srcMode === "input_file" ? "" : "hidden"}" id="td-input-wrap">
-        <div class="field">
-          <label for="td-input-file">选择 NAS 输入文件 (/data/inputs/)</label>
-          <span class="hint">若链接列表最新在前，日常增量建议 Skip 设为 <code>exit:10</code></span>
-          <div class="input-with-btn">
-            <select id="td-input-file"></select>
-            <button type="button" class="btn sm" id="td-refresh-inputs-btn">刷新</button>
-          </div>
-        </div>
-        <div class="field">
-          <label for="td-upload-file">上传 / 覆盖 .txt 列表文件</label>
-          <div class="file-picker-row">
-            <input id="td-upload-file" type="file" accept=".txt,text/plain" class="file-input">
-            <button type="button" class="btn sm" id="td-upload-btn">上传到 NAS</button>
-          </div>
-        </div>
-      </div>
-
-      <div class="field">
-        <label for="td-notes">备注（可选）</label>
-        <input id="td-notes" type="text" value="${esc(task?.notes || "")}" placeholder="任务用途或说明">
-      </div>
-
-      <div id="td-options-slot"></div>
-
-      <div class="row-actions ${isNew ? "between" : ""}" style="${isNew ? "" : "justify-content:flex-end;"}">
-        ${isNew ? `
-          <label class="checkbox-inline">
-            <input type="checkbox" switch role="switch" class="switch-ok" id="td-enabled" checked> 启用定时调度
-          </label>` : ""}
-        <div class="row-actions">
-          <a class="btn" href="#/tasks">返回列表</a>
-          <button type="submit" class="btn primary">${isNew ? "创建任务" : "保存设置"}</button>
-        </div>
-      </div>
-    </form>
-  `;
-}
-
-async function renderOverviewTab(detail, sitesHealth) {
-  const { task, recent_runs: runs, health, sites } = detail;
-  const bySite = new Map((sitesHealth || []).map((s) => [s.site, s]));
-  const rateText = health.success_rate != null ? `${Math.round(health.success_rate * 100)}%` : "-";
-
-  return `
-    <div class="stats-grid">
-      <div class="card stat-card"><span class="muted sm">近期成功率 (近 ${health.total} 次)</span><strong>${rateText}</strong></div>
-      <div class="card stat-card"><span class="muted sm">近 30 次累计新增</span><strong>${health.total_downloaded ?? 0}</strong></div>
-      <div class="card stat-card"><span class="muted sm">平均耗时</span><strong>${fmtDuration(health.avg_duration_sec)}</strong></div>
-      <div class="card stat-card"><span class="muted sm">当前连续异常</span><strong style="color:${task.consecutive_failures > 0 ? "var(--danger)" : "inherit"}">${task.consecutive_failures}</strong></div>
-    </div>
-
-    <div class="two-col">
-      <section class="card stack sm-gap">
-        <h2 style="margin:0; font-size:1.05rem;">调度与来源</h2>
-        <div class="sm">Cron：<code>${esc(task.cron_expr)}</code> · ${esc(task.cron_desc)}</div>
-        ${task.next_runs?.length
-          ? `<div class="stack xs-gap"><span class="muted sm">未来 3 次预计执行：</span>${task.next_runs.map((n) => `<div class="xs mono">${fmtTime(n)}</div>`).join("")}</div>`
-          : `<div class="muted sm">当前已停用定时调度</div>`}
-        <div class="stack xs-gap">
-          <span class="muted sm">抓取目标：</span>
-          ${task.input_file ? `<code>-i /data/inputs/${esc(task.input_file)}</code>` : `<pre class="cmd-preview">${esc((task.urls || []).join("\n"))}</pre>`}
-        </div>
-      </section>
-
-      <section class="card stack sm-gap">
-        <h2 style="margin:0; font-size:1.05rem;">关联站点凭据健康</h2>
-        ${sites?.length
-          ? sites
-              .map((s) => {
-                const info = bySite.get(s);
-                return `
-                  <div class="upcoming-item">
-                    <div class="row-actions">
-                      <strong>${esc(s)}</strong>
-                      ${healthBadge(info?.health || "unknown")}
-                      <span class="muted xs">${info ? `Cookie: ${info.cookie_count}` : "未配置"}</span>
-                    </div>
-                    <a class="btn sm" href="#/sites/${encodeURIComponent(s)}">站点配置</a>
-                  </div>`;
-              })
-              .join("")
-          : `<div class="muted sm">暂未识别到具体站点域名</div>`}
-      </section>
-    </div>
-
-    <section class="card">
-      <div class="card-head">
-        <h2>最近运行历史 (${runs.length})</h2>
-        <a class="btn sm" href="#/runs">在运行中心查看</a>
-      </div>
-      <div tabindex="0" role="region" aria-labelledby="td-runs-cap" class="table-wrapper">
-        <table class="data-table">
-          <caption id="td-runs-cap" class="visually-hidden">任务最近运行记录</caption>
-          <thead>
-            <tr>
-              <th>ID</th>
-              <th>触发</th>
-              <th>状态</th>
-              <th>新增 / 跳过</th>
-              <th>耗时</th>
-              <th>时间</th>
-              <th>操作</th>
-            </tr>
-          </thead>
-          <tbody>
-            ${runs.length
-              ? runs
-                  .map(
-                    (r) => `
-              <tr class="clickable-row" data-td-open-run="${r.id}">
-                <td data-label="ID">#${r.id}</td>
-                <td data-label="触发">${esc(r.trigger_type)}${r.simulate ? ' <span class="badge">模拟</span>' : ""}</td>
-                <td data-label="状态">${statusBadge(r.status)}</td>
-                <td data-label="新增 / 跳过">+${r.downloaded_count} / ${r.skipped_count}</td>
-                <td data-label="耗时">${fmtDuration(r.duration_sec)}</td>
-                <td data-label="时间">${fmtTime(r.created_at)}</td>
-                <td data-label="操作"><a class="btn ghost sm" href="#/runs/${r.id}">日志与详情</a></td>
-              </tr>`
-                  )
-                  .join("")
-              : `<tr><td colspan="7" class="muted">尚无运行记录。</td></tr>`}
-          </tbody>
-        </table>
-      </div>
-    </section>
-  `;
-}
-
-function wireTaskForm(task = null) {
-  const form = document.getElementById("task-edit-form");
-  if (!form) return;
-  upgradeSwitches(form);
-
-  const srcModeEl = document.getElementById("td-source-mode");
-  const urlsEl = document.getElementById("td-urls");
-  const inputSel = document.getElementById("td-input-file");
-  const cronEl = document.getElementById("td-cron");
-
-  if (optionsApi) optionsApi.destroy();
-  optionsApi = mountDownloadOptions(document.getElementById("td-options-slot"), {
-    initial: task || {},
-    getContext: () => ({
-      task_id: task?.id || null,
-      urls: srcModeEl.value === "urls" ? urlsEl.value : "",
-      input_file: srcModeEl.value === "input_file" ? inputSel.value : "",
-    }),
+    overview: overviewRes,
+    getContextUrl: () => urlsIn.value,
   });
 
-  fetchInputOptions(task?.input_file || "");
-  previewCronExpr();
-
-  const debouncedEff = debounce(() => optionsApi?.refreshEffective(), 250);
-  cronEl.addEventListener("input", debounce(previewCronExpr, 220));
-  srcModeEl.addEventListener("change", () => {
-    syncSourceMode();
-    debouncedEff();
-  });
-  urlsEl.addEventListener("input", debouncedEff);
-  inputSel.addEventListener("change", debouncedEff);
-
-  form.addEventListener("click", async (e) => {
-    const presetBtn = e.target.closest("[data-cron-preset]");
-    if (presetBtn) {
-      cronEl.value = presetBtn.dataset.cronPreset;
-      previewCronExpr();
-      return;
-    }
-    if (e.target.id === "td-refresh-inputs-btn") {
-      await fetchInputOptions(inputSel.value);
-      return;
-    }
-    if (e.target.id === "td-upload-btn") {
-      const fileInput = document.getElementById("td-upload-file");
-      const file = fileInput.files?.[0];
-      if (!file) return showToast("请先选择要上传的 .txt 文件", "danger");
-      try {
-        const content = await file.text();
-        const res = await api("/api/inputs/upload", { method: "POST", body: { filename: file.name, content } });
-        fileInput.value = "";
-        await fetchInputOptions(res.file.name);
-        showToast(`已上传 ${res.file.name} (${res.file.url_count} 条 URL)`);
-        debouncedEff();
-      } catch (err) {
-        showToast(err.message, "danger");
-      }
-    }
-  });
-
-  form.addEventListener("submit", async (e) => {
-    e.preventDefault();
-    const opts = optionsApi.getValues();
-    const srcMode = srcModeEl.value;
-    const payload = {
-      name: document.getElementById("td-name").value.trim(),
-      cron_expr: cronEl.value.trim(),
-      urls: srcMode === "urls" ? urlsEl.value : "",
-      input_file: srcMode === "input_file" ? inputSel.value : "",
-      notes: document.getElementById("td-notes").value.trim(),
-      enabled: task?.id
-        ? Boolean(document.getElementById("td-header-toggle")?.checked ?? task.enabled)
-        : Boolean(document.getElementById("td-enabled")?.checked ?? true),
-      ...opts,
-    };
+  const refreshCron = debounce(async () => {
+    const expr = cronIn.value.trim();
+    if (!expr) return;
     try {
-      if (task?.id) {
-        await api(`/api/tasks/${task.id}`, { method: "PUT", body: payload });
-        showToast("任务设置已保存");
-        await loadAndRender(task.id);
-      } else {
-        const res = await api("/api/tasks", { method: "POST", body: payload });
-        showToast("任务已创建");
-        navigate(`#/tasks/${res.task.id}`);
-      }
+      const res = await api.post("/api/cron/preview", { cron_expr: expr });
+      const nextRuns = res?.next_runs || res?.times || [];
+      cronHint.textContent = nextRuns.length ? `未来触发：${nextRuns.slice(0, 3).map(fmtTimeShort).join(" 、")}` : "表达式有效";
     } catch (err) {
-      showToast(err.message, "danger");
+      cronHint.textContent = `表达式无效：${err.message}`;
     }
-  });
-}
+  }, 250);
+  cronIn.addEventListener("input", refreshCron);
+  urlsIn.addEventListener("input", () => optCtrl.refreshPreview());
 
-async function loadAndRender(taskId) {
-  if (unmounted || !hostEl) return;
+  const saveBtn = el("button", { type: "submit", class: "fl-btn accent" }, "保存修改");
 
-  if (!taskId) {
-    hostEl.innerHTML = `
-      <div class="page-head">
-        <div>
-          <div class="breadcrumbs"><a href="#/tasks">← 定时任务</a></div>
-          <h1>新建定时任务</h1>
-        </div>
-      </div>
-      ${renderSettingsForm(null)}
-    `;
-    wireTaskForm(null);
-    return;
+  const form = el(
+    "form",
+    {
+      class: "fl-card stack",
+      onSubmit: async (e) => {
+        e.preventDefault();
+        const urls = urlsIn.value
+          .split(/\r?\n/)
+          .map((l) => l.trim())
+          .filter((l) => l && !l.startsWith("#"));
+        if (!nameIn.value.trim() || !cronIn.value.trim() || (!urls.length && !inputSel.value)) {
+          toast("请确保名称、Cron 表达式以及至少一个 URL 或 NAS 文件不为空", "danger");
+          return;
+        }
+        saveBtn.disabled = true;
+        try {
+          await api.put(`/api/tasks/${encodeURIComponent(taskId)}`, {
+            name: nameIn.value.trim(),
+            cron_expr: cronIn.value.trim(),
+            enabled: enabledIn.checked,
+            urls,
+            input_file: inputSel.value || "",
+            ...optCtrl.getPayload(),
+          });
+          toast("任务配置已保存");
+          await ctx?.refreshHeader?.();
+        } catch (err) {
+          toast(`保存失败：${err.message}`, "danger");
+        } finally {
+          saveBtn.disabled = false;
+        }
+      },
+    },
+    el(
+      "div",
+      { class: "form-grid-2" },
+      el("div", { class: "field" }, el("label", null, "任务名称"), nameIn),
+      el("div", { class: "field" }, el("label", null, "Cron 表达式"), cronIn, cronHint)
+    ),
+    el(
+      "div",
+      { class: "form-grid-2" },
+      el("div", { class: "field" }, el("label", null, "目标 URL（每行一个）"), urlsIn),
+      el(
+        "div",
+        { class: "stack sm-gap" },
+        el("div", { class: "field" }, el("label", null, "NAS /data/inputs/ 文件"), inputSel),
+        el("label", { class: "switch-inline" }, enabledIn, el("span", null, "启用此定时任务"))
+      )
+    ),
+    el(
+      "details",
+      { class: "fl-expander", open: true },
+      el("summary", { class: "fl-expander-head" }, "高级选项与生效配置预览"),
+      el("div", { class: "fl-expander-body" }, optCtrl.el)
+    ),
+    el(
+      "div",
+      { class: "row-actions between" },
+      el(
+        "button",
+        {
+          type: "button",
+          class: "fl-btn danger",
+          onClick: async () => {
+            const ok = await confirmModal({
+              title: "删除定时任务",
+              message: `确定永久删除定时任务「${task.name}」吗？（历史运行日志将保留）`,
+              okText: "删除",
+              danger: true,
+            });
+            if (!ok) return;
+            await api.del(`/api/tasks/${encodeURIComponent(taskId)}`);
+            toast("已删除定时任务");
+            await ctx?.refreshHeader?.();
+            navigate("#tasks");
+          },
+        },
+        "删除任务"
+      ),
+      el(
+        "div",
+        { class: "row-actions" },
+        el(
+          "button",
+          {
+            type: "button",
+            class: "fl-btn",
+            onClick: async () => {
+              const res = await api.post(`/api/tasks/${encodeURIComponent(taskId)}/run`, { simulate: true });
+              toast(res?.run_id ? `已启动模拟试跑 #${res.run_id}` : "已加入模拟队列");
+              if (res?.run_id) navigate(`#runs/${res.run_id}`);
+            },
+          },
+          "模拟试跑 (-s)"
+        ),
+        el(
+          "button",
+          {
+            type: "button",
+            class: "fl-btn",
+            onClick: async () => {
+              const res = await api.post(`/api/tasks/${encodeURIComponent(taskId)}/run`, { simulate: false });
+              toast(res?.run_id ? `已启动运行 #${res.run_id}` : "已加入运行队列");
+              if (res?.run_id) navigate(`#runs/${res.run_id}`);
+            },
+          },
+          "立即运行"
+        ),
+        saveBtn
+      )
+    )
+  );
+
+  // Recent runs table
+  const historyCard = el(
+    "section",
+    { class: "fl-card stack sm-gap" },
+    el("h2", { class: "fl-card-title", style: { margin: 0 } }, "本任务近期运行历史")
+  );
+  if (!taskRuns.length) {
+    historyCard.appendChild(el("div", { class: "empty-state" }, "暂无运行历史记录"));
+  } else {
+    const tblWrap = el(
+      "div",
+      { class: "table-wrapper", tabindex: "0", "aria-label": "任务运行历史表格" },
+      el(
+        "table",
+        { class: "data-table" },
+        el(
+          "thead",
+          null,
+          el("tr", null, el("th", null, "ID"), el("th", null, "状态"), el("th", null, "新增/跳过"), el("th", null, "耗时"), el("th", null, "触发时间"), el("th", null, "操作"))
+        ),
+        el(
+          "tbody",
+          null,
+          ...taskRuns.map((r) =>
+            el(
+              "tr",
+              null,
+              el("td", null, el("a", { href: `#runs/${r.id}` }, `#${r.id}`)),
+              el("td", null, statusBadge(r.status)),
+              el("td", null, `+${r.files_downloaded ?? 0} / ${r.files_skipped ?? 0}`),
+              el("td", null, fmtDuration(r.duration_seconds)),
+              el("td", null, fmtTimeShort(r.created_at)),
+              el(
+                "td",
+                null,
+                el("a", { class: "fl-btn subtle xs", href: `#runs/${r.id}` }, "日志")
+              )
+            )
+          )
+        )
+      )
+    );
+    historyCard.appendChild(tblWrap);
   }
 
-  let detail;
-  try {
-    detail = await api(`/api/tasks/${taskId}`);
-  } catch {
-    detail = await loadTaskDetailFallback(taskId);
-  }
-  const sitesHealth = await getSitesHealth().catch(() => []);
-  if (unmounted || !hostEl) return;
-
-  const t = detail.task;
-  const swClass = HAS_NATIVE_SWITCH ? "switch-ok" : "switch-ok switch-fallback";
-  const overviewHtml = activeTab === "overview" ? await renderOverviewTab(detail, sitesHealth) : "";
-
-  hostEl.innerHTML = `
-    <div class="page-head">
-      <div>
-        <div class="breadcrumbs"><a href="#/tasks">← 定时任务</a><span>/</span><span>#${t.id}</span></div>
-        <div class="row-actions">
-          <h1>${esc(t.name)}</h1>
-          ${t.last_status ? statusBadge(t.last_status) : ""}
-        </div>
-      </div>
-      <div class="row-actions">
-        <label class="switch-wrap">
-          <input type="checkbox" switch role="switch" class="${swClass}" id="td-header-toggle" ${t.enabled ? "checked" : ""}>
-          <span class="sm">${t.enabled ? "已启用" : "已停用"}</span>
-        </label>
-        <button type="button" class="btn primary sm" id="td-run-now-btn">立即执行</button>
-        <button type="button" class="btn sm" id="td-sim-btn">模拟试跑</button>
-        <button type="button" class="btn danger sm" id="td-delete-btn">删除任务</button>
-      </div>
-    </div>
-
-    <div class="subtabs" role="tablist" aria-label="任务页面标签">
-      <button type="button" class="subtab-btn ${activeTab === "overview" ? "active" : ""}" role="tab" aria-selected="${activeTab === "overview"}" data-td-tab="overview">概览与历史</button>
-      <button type="button" class="subtab-btn ${activeTab === "settings" ? "active" : ""}" role="tab" aria-selected="${activeTab === "settings"}" data-td-tab="settings">任务设置与生效配置</button>
-    </div>
-
-    <div id="td-tab-body" class="stack lg-gap">
-      ${activeTab === "overview" ? overviewHtml : renderSettingsForm(t)}
-    </div>
-  `;
-
-  if (activeTab === "settings") {
-    wireTaskForm(t);
-  }
-}
-
-export async function mount(el, params) {
-  unmounted = false;
-  hostEl = el;
-  currentTaskId = params.id ? Number(params.id) : null;
-  activeTab = currentTaskId ? "overview" : "settings";
-  el.innerHTML = `<div class="notice muted">正在加载任务详情…</div>`;
-
-  el.addEventListener("click", onClick);
-  el.addEventListener("change", onChange);
-  await loadAndRender(currentTaskId);
-}
-
-async function onChange(e) {
-  if (e.target.id === "td-header-toggle" && currentTaskId) {
-    try {
-      await api(`/api/tasks/${currentTaskId}/toggle`, { method: "POST" });
-      await loadAndRender(currentTaskId);
-    } catch (err) {
-      e.target.checked = !e.target.checked;
-      showToast(err.message, "danger");
-    }
-  }
-}
-
-async function onClick(e) {
-  const tabBtn = e.target.closest("[data-td-tab]");
-  if (tabBtn && currentTaskId) {
-    activeTab = tabBtn.dataset.tdTab;
-    await loadAndRender(currentTaskId);
-    return;
-  }
-  const btn = e.target.closest("button");
-  if (btn && currentTaskId) {
-    try {
-      if (btn.id === "td-run-now-btn" || btn.id === "td-sim-btn") {
-        const sim = btn.id === "td-sim-btn";
-        const res = await api(`/api/tasks/${currentTaskId}/run`, { method: "POST", body: { simulate: sim } });
-        showToast(res.already_active ? `任务已在执行中 (Run #${res.run_id})` : `已入队 Run #${res.run_id}`);
-        navigate(`#/runs/${res.run_id}`);
-      } else if (btn.id === "td-delete-btn") {
-        const ok = await confirmDialog("删除定时任务", "确定删除此定时任务？历史运行记录仍会保留。", {
-          confirmText: "删除",
-          danger: true,
-        });
-        if (!ok) return;
-        await api(`/api/tasks/${currentTaskId}`, { method: "DELETE" });
-        showToast("任务已删除");
-        navigate("#/tasks");
-      }
-    } catch (err) {
-      showToast(err.message, "danger");
-    }
-    return;
-  }
-  if (e.target.closest("a")) return;
-  const row = e.target.closest("tr[data-td-open-run]");
-  if (row) navigate(`#/runs/${row.dataset.tdOpenRun}`);
-}
-
-export function onEvent(ev) {
-  if (currentTaskId && activeTab === "overview" && ["run_queued", "run_started", "run_finished", "tasks_changed", "poll_tick"].includes(ev.type)) {
-    loadAndRender(currentTaskId).catch(() => {});
-  }
-}
-
-export function unmount() {
-  unmounted = true;
-  if (optionsApi) {
-    optionsApi.destroy();
-    optionsApi = null;
-  }
-  if (hostEl) {
-    hostEl.removeEventListener("click", onClick);
-    hostEl.removeEventListener("change", onChange);
-  }
-  hostEl = null;
+  container.replaceChildren(
+    el(
+      "div",
+      { class: "stack" },
+      el(
+        "div",
+        { class: "row-actions between" },
+        el(
+          "div",
+          { class: "row-actions" },
+          el("a", { class: "fl-btn subtle sm", href: "#tasks" }, "← 返回任务列表"),
+          el("h1", { class: "fl-page-title", style: { margin: 0, fontSize: "1.3rem" } }, task.name || `任务 #${task.id}`)
+        ),
+        el("span", { class: "muted xs" }, `Task ID #${task.id}`)
+      ),
+      form,
+      historyCard
+    )
+  );
 }

@@ -1,108 +1,46 @@
-/** Hash-based client router with view lifecycle and accessibility focus transfer. */
+export function parseHash(rawHash = location.hash) {
+  let clean = (rawHash || "#activity").replace(/^#/, "");
+  if (clean.startsWith("/")) clean = clean.slice(1);
+  const [pathPart, queryPart] = clean.split("?");
+  const segs = pathPart.split("/").filter(Boolean).map(decodeURIComponent);
+  const params = Object.fromEntries(new URLSearchParams(queryPart || ""));
 
-const routes = [];
-let activeRoute = null;
-let activeView = null;
-let mountSeq = 0;
-
-export function registerRoute(pattern, loader) {
-  const keys = [];
-  const regexStr = pattern
-    .replace(/\/+$/, "")
-    .replace(/:([A-Za-z0-9_]+)/g, (_, key) => {
-      keys.push(key);
-      return "([^/]+)";
-    });
-  const regex = new RegExp(`^${regexStr || "/"}$`);
-  routes.push({ pattern, regex, keys, loader });
-}
-
-export function parseHash(hashStr = location.hash) {
-  let path = (hashStr || "#/").replace(/^#/, "");
-  if (!path.startsWith("/")) path = "/" + path;
-  if (path.length > 1) path = path.replace(/\/+$/, "");
-
-  for (const r of routes) {
-    const m = path.match(r.regex);
-    if (m) {
-      const params = {};
-      r.keys.forEach((k, i) => {
-        params[k] = decodeURIComponent(m[i + 1]);
-      });
-      return { route: r, path, params };
-    }
+  if (!segs.length || segs[0] === "activity") {
+    return { view: "activity", nav: "activity", params };
   }
-  return { route: routes[0], path: "/", params: {} };
-}
-
-export function navigate(hash) {
-  const target = hash.startsWith("#") ? hash : `#${hash}`;
-  if (location.hash === target) {
-    return renderCurrentRoute();
+  if (segs[0] === "tasks") {
+    return { view: "tasks", nav: "tasks", params };
   }
-  location.hash = target;
-}
-
-export function getActiveView() {
-  return activeView;
-}
-
-export function currentPath() {
-  return activeRoute?.path || "/";
-}
-
-function updateNavActive(path) {
-  let section = "activity";
-  if (path.startsWith("/tasks")) section = "tasks";
-  else if (path.startsWith("/runs")) section = "runs";
-  else if (path.startsWith("/sites")) section = "sites";
-  else if (path.startsWith("/settings")) section = "settings";
-
-  document.querySelectorAll("[data-nav]").forEach((el) => {
-    if (el.dataset.nav === section) el.setAttribute("aria-current", "page");
-    else el.removeAttribute("aria-current");
-  });
-}
-
-export async function renderCurrentRoute() {
-  const seq = ++mountSeq;
-  const container = document.getElementById("app-main");
-  if (!container) return;
-
-  const matched = parseHash(location.hash);
-  activeRoute = matched;
-  updateNavActive(matched.path);
-
-  if (activeView?.unmount) {
-    try {
-      activeView.unmount();
-    } catch {}
+  if (segs[0] === "task" && segs[1]) {
+    return { view: "task-detail", nav: "tasks", id: segs[1], params };
   }
-  activeView = null;
+  if (segs[0] === "runs") {
+    return { view: "runs", nav: "runs", id: segs[1] || null, params };
+  }
+  if (segs[0] === "sites") {
+    return { view: "sites", nav: "sites", params };
+  }
+  if (segs[0] === "site" && segs[1]) {
+    return { view: "site-detail", nav: "sites", site: segs[1], params };
+  }
+  if (segs[0] === "settings") {
+    return { view: "settings", nav: "settings", tab: segs[1] || "general", params };
+  }
+  return { view: "activity", nav: "activity", params };
+}
 
-  try {
-    const mod = await matched.route.loader();
-    if (seq !== mountSeq) return;
-    activeView = mod;
-    await mod.mount(container, matched.params);
-    if (seq !== mountSeq) return;
-    const h1 = container.querySelector("h1");
-    if (h1) {
-      h1.setAttribute("tabindex", "-1");
-      h1.focus({ preventScroll: true });
-    }
-  } catch (err) {
-    if (seq !== mountSeq) return;
-    container.innerHTML = `<div class="notice danger">页面加载失败：${err?.message || err}</div>`;
+export function navigate(targetHash) {
+  const h = targetHash.startsWith("#") ? targetHash : `#${targetHash}`;
+  if (location.hash === h) {
+    window.dispatchEvent(new HashChangeEvent("hashchange"));
+  } else {
+    location.hash = h;
   }
 }
 
-export function startRouter() {
-  window.addEventListener("hashchange", () => {
-    renderCurrentRoute();
-  });
-  if (!location.hash) {
-    history.replaceState(null, "", "#/");
-  }
-  return renderCurrentRoute();
+export function startRouter(onRoute) {
+  const handle = () => onRoute(parseHash(location.hash));
+  window.addEventListener("hashchange", handle);
+  handle();
+  return () => window.removeEventListener("hashchange", handle);
 }

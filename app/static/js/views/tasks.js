@@ -1,337 +1,439 @@
 import { api } from "../api.js";
-import { navigate } from "../router.js";
+import { events } from "../events.js";
 import {
-  clearPopoverFallbackStyles,
-  confirmDialog,
-  debounce,
-  esc,
-  fmtTime,
-  HAS_NATIVE_SWITCH,
-  positionPopoverFallback,
-  showToast,
+  el,
+  toast,
+  confirmModal,
   statusBadge,
+  fmtTimeShort,
+  relTime,
+  debounce,
 } from "../util.js";
+import { navigate } from "../router.js";
+import { createDownloadOptions } from "../components/download-options.js";
 
-let hostEl = null;
-let unmounted = false;
-let tasks = [];
-let batchMode = false;
-const selectedIds = new Set();
-let searchQuery = "";
-let filterMode = "all";
+export async function renderTasks(container, _route, ctx) {
+  let destroyed = false;
+  let tasks = [];
+  let inputs = [];
+  let overview = null;
+  let selectedIds = new Set();
+  let query = "";
+  let filterEnabled = "all"; // "all" | "enabled" | "disabled"
+  let showCreateForm = false;
 
-function filterTasks(list) {
-  const q = searchQuery.trim().toLowerCase();
-  return list.filter((t) => {
-    if (filterMode === "enabled" && !t.enabled) return false;
-    if (filterMode === "disabled" && t.enabled) return false;
-    if (filterMode === "failing" && Number(t.consecutive_failures || 0) === 0) return false;
-    if (q) {
-      const hay = [t.name, t.input_file, ...(t.urls || []), ...(t.sites || [])].join(" ").toLowerCase();
-      if (!hay.includes(q)) return false;
+  const page = el("div", { class: "stack" });
+  const listWrap = el("div", { class: "stack sm-gap" });
+  const createSlot = el("div");
+  const batchBar = el("div", { class: "fl-infobar hidden" });
+
+  async function fetchData() {
+    const [tasksRes, inputsRes, overviewRes] = await Promise.all([
+      api.get("/api/tasks"),
+      api.get("/api/inputs").catch(() => null),
+      api.get("/api/config/overview").catch(() => null),
+    ]);
+    if (destroyed) return;
+    tasks = tasksRes?.tasks || tasksRes?.items || (Array.isArray(tasksRes) ? tasksRes : []);
+    inputs = inputsRes?.files || inputsRes?.items || (Array.isArray(inputsRes) ? inputsRes : []);
+    overview = overviewRes;
+  }
+
+  function renderBatchBar() {
+    batchBar.innerHTML = "";
+    if (!selectedIds.size) {
+      batchBar.classList.add("hidden");
+      return;
     }
-    return true;
-  });
-}
-
-function renderSparkline(recentStatuses = []) {
-  if (!recentStatuses.length) return `<span class="muted xs">暂无运行</span>`;
-  return `
-    <div class="health-bars" aria-label="最近运行趋势">
-      ${recentStatuses
-        .map(
-          (r) =>
-            `<a class="health-bar ${esc(r.status)}" href="#/runs/${r.id}" title="#${r.id} · ${esc(r.status)} · +${r.downloaded_count ?? 0}"></a>`
-        )
-        .join("")}
-    </div>
-  `;
-}
-
-function syncBatchUI(visible) {
-  const bar = document.getElementById("tasks-batch-bar");
-  const th = document.getElementById("tasks-batch-th");
-  const toggleBtn = document.getElementById("tasks-batch-toggle-btn");
-  if (!bar || !th || !toggleBtn) return;
-
-  bar.classList.toggle("hidden", !batchMode);
-  th.classList.toggle("hidden", !batchMode);
-  toggleBtn.textContent = batchMode ? "完成批量管理" : "批量管理";
-
-  const visibleIds = visible.map((t) => t.id);
-  const selectedVisible = visibleIds.filter((id) => selectedIds.has(id)).length;
-  const selectAll = document.getElementById("tasks-select-all");
-  if (selectAll) {
-    selectAll.checked = visibleIds.length > 0 && selectedVisible === visibleIds.length;
-    selectAll.indeterminate = selectedVisible > 0 && selectedVisible < visibleIds.length;
-  }
-  const cntEl = document.getElementById("tasks-batch-count");
-  if (cntEl) cntEl.textContent = `已选 ${selectedIds.size} 项`;
-  hostEl?.querySelectorAll("[data-batch-action]").forEach((b) => {
-    b.disabled = selectedIds.size === 0;
-  });
-}
-
-function renderTable() {
-  const tbody = document.getElementById("tasks-tbody");
-  if (!tbody) return;
-  const validIds = new Set(tasks.map((t) => t.id));
-  for (const id of [...selectedIds]) {
-    if (!validIds.has(id)) selectedIds.delete(id);
-  }
-  const visible = filterTasks(tasks);
-  syncBatchUI(visible);
-
-  if (!visible.length) {
-    tbody.innerHTML = `<tr><td colspan="${batchMode ? 6 : 5}" class="muted">${tasks.length ? "没有符合筛选条件的任务。" : "暂无定时任务，点击右上角「＋ 新建任务」。"}</td></tr>`;
-    return;
-  }
-
-  const swClass = HAS_NATIVE_SWITCH ? "task-switch" : "task-switch switch-fallback";
-  tbody.innerHTML = visible
-    .map(
-      (t) => `
-    <tr>
-      <td class="batch-col ${batchMode ? "" : "hidden"}" data-label="选择">
-        <input type="checkbox" class="checkbox-custom" data-select-task="${t.id}" ${selectedIds.has(t.id) ? "checked" : ""} aria-label="选择任务 ${esc(t.name)}">
-      </td>
-      <td data-label="任务名称">
-        <div class="row-actions" style="gap:0.4rem;">
-          <a href="#/tasks/${t.id}"><strong>${esc(t.name)}</strong></a>
-          ${(t.sites || []).map((s) => `<span class="badge">${esc(s)}</span>`).join("")}
-        </div>
-        <div class="muted sm">${t.input_file ? `输入文件：<code>${esc(t.input_file)}</code>` : esc((t.urls || []).slice(0, 2).join(" · "))}${(t.urls || []).length > 2 ? ` 等 ${t.urls.length} 条` : ""}</div>
-      </td>
-      <td data-label="启用状态">
-        <label class="switch-wrap">
-          <input type="checkbox" switch role="switch" class="${swClass}" data-toggle-task="${t.id}" ${t.enabled ? "checked" : ""} aria-label="启用定时任务 ${esc(t.name)}">
-          <span class="sm ${t.enabled ? "" : "muted"}">${t.enabled ? "已启用" : "已停用"}</span>
-        </label>
-        ${t.consecutive_failures > 0 ? `<div class="xs" style="color:var(--danger); margin-top:0.2rem;">连续异常 ${t.consecutive_failures} 次</div>` : ""}
-      </td>
-      <td data-label="调度计划">
-        <code>${esc(t.cron_expr)}</code>
-        <div class="muted sm">${esc(t.cron_desc)}</div>
-        ${t.next_runs?.length ? `<div class="muted xs">下次：${fmtTime(t.next_runs[0])}</div>` : ""}
-      </td>
-      <td data-label="最近执行">
-        <div class="stack xs-gap">
-          ${renderSparkline(t.recent_statuses)}
-          <div class="row-actions" style="gap:0.35rem;">
-            ${t.last_status ? statusBadge(t.last_status) : '<span class="muted xs">尚未运行</span>'}
-            <span class="muted xs">${fmtTime(t.last_run_at)}</span>
-          </div>
-        </div>
-      </td>
-      <td data-label="操作">
-        <div class="row-actions">
-          <button type="button" class="btn primary sm" data-run-task="${t.id}">立即执行</button>
-          <button type="button" class="btn ghost sm icon-btn" popovertarget="task-menu-${t.id}" style="anchor-name: --tm-${t.id}" aria-label="更多操作 (${esc(t.name)})">⋯</button>
-          <div id="task-menu-${t.id}" popover="auto" class="action-popover" style="position-anchor: --tm-${t.id}">
-            <button type="button" class="popover-item" data-sim-task="${t.id}">模拟试跑</button>
-            <button type="button" class="popover-item" data-goto-task="${t.id}">查看 / 编辑设置</button>
-            <button type="button" class="popover-item danger" data-delete-task="${t.id}">删除任务</button>
-          </div>
-        </div>
-      </td>
-    </tr>`
-    )
-    .join("");
-}
-
-async function fetchAndRender() {
-  const data = await api("/api/tasks");
-  if (unmounted) return;
-  tasks = data.tasks || [];
-  renderTable();
-}
-
-const debouncedReload = debounce(() => fetchAndRender().catch(() => {}), 250);
-
-export async function mount(el) {
-  unmounted = false;
-  hostEl = el;
-  el.innerHTML = `
-    <div class="page-head">
-      <div>
-        <h1>定时任务</h1>
-        <p class="muted sm" style="margin:0.2rem 0 0;">查看近期健康走势、启停调度，点开任务名称可管理详情与继承配置</p>
-      </div>
-      <div class="row-actions">
-        <button type="button" class="btn" id="tasks-batch-toggle-btn">批量管理</button>
-        <a class="btn primary" href="#/tasks/new">＋ 新建任务</a>
-      </div>
-    </div>
-
-    <div class="card stack">
-      <div class="filter-bar">
-        <input type="search" id="tasks-search" value="${esc(searchQuery)}" placeholder="搜索任务名、URL 或站点…" aria-label="搜索定时任务">
-        <div class="chip-group" role="group" aria-label="按状态过滤">
-          <button type="button" class="chip-btn" data-task-filter="all" aria-pressed="${filterMode === "all"}">全部</button>
-          <button type="button" class="chip-btn" data-task-filter="enabled" aria-pressed="${filterMode === "enabled"}">已启用</button>
-          <button type="button" class="chip-btn" data-task-filter="disabled" aria-pressed="${filterMode === "disabled"}">已停用</button>
-          <button type="button" class="chip-btn" data-task-filter="failing" aria-pressed="${filterMode === "failing"}">连续异常</button>
-        </div>
-      </div>
-
-      <div id="tasks-batch-bar" class="batch-bar hidden">
-        <div class="row-actions">
-          <label class="checkbox-inline"><input type="checkbox" class="checkbox-custom" id="tasks-select-all"> 全选</label>
-          <span id="tasks-batch-count" class="muted sm">已选 0 项</span>
-        </div>
-        <div class="row-actions">
-          <button type="button" class="btn sm" data-batch-action="enable">批量启用</button>
-          <button type="button" class="btn sm" data-batch-action="disable">批量停用</button>
-          <button type="button" class="btn danger sm" data-batch-action="delete">批量删除</button>
-          <button type="button" class="btn ghost sm" id="tasks-batch-exit-btn">退出多选</button>
-        </div>
-      </div>
-
-      <div tabindex="0" role="region" aria-labelledby="tasks-cap" class="table-wrapper">
-        <table class="data-table">
-          <caption id="tasks-cap" class="visually-hidden">定时抓取任务列表</caption>
-          <thead>
-            <tr>
-              <th id="tasks-batch-th" class="batch-col hidden">选择</th>
-              <th>任务名称</th>
-              <th>启用状态</th>
-              <th>调度计划 (Cron)</th>
-              <th>近 10 次健康度与最近运行</th>
-              <th>操作</th>
-            </tr>
-          </thead>
-          <tbody id="tasks-tbody">
-            <tr><td colspan="5" class="muted">正在加载任务…</td></tr>
-          </tbody>
-        </table>
-      </div>
-    </div>
-  `;
-
-  el.addEventListener("input", onInput);
-  el.addEventListener("change", onChange);
-  el.addEventListener("click", onClick);
-  el.addEventListener("toggle", onPopoverToggle, true);
-
-  await fetchAndRender();
-}
-
-function onInput(e) {
-  if (e.target.id === "tasks-search") {
-    searchQuery = e.target.value;
-    renderTable();
-  }
-}
-
-async function onChange(e) {
-  const input = e.target;
-  if (input.id === "tasks-select-all") {
-    const visible = filterTasks(tasks);
-    if (input.checked) visible.forEach((t) => selectedIds.add(t.id));
-    else visible.forEach((t) => selectedIds.delete(t.id));
-    renderTable();
-  } else if (input.dataset?.selectTask) {
-    const id = Number(input.dataset.selectTask);
-    if (input.checked) selectedIds.add(id);
-    else selectedIds.delete(id);
-    syncBatchUI(filterTasks(tasks));
-  } else if (input.dataset?.toggleTask) {
-    const id = input.dataset.toggleTask;
-    try {
-      await api(`/api/tasks/${id}/toggle`, { method: "POST" });
-      await fetchAndRender();
-    } catch (err) {
-      input.checked = !input.checked;
-      showToast(err.message, "danger");
-    }
-  }
-}
-
-function onPopoverToggle(e) {
-  const pop = e.target;
-  if (!pop.classList?.contains("action-popover")) return;
-  if (e.newState !== "open") {
-    clearPopoverFallbackStyles(pop);
-    return;
-  }
-  const trigger = hostEl?.querySelector(`[popovertarget="${pop.id}"]`);
-  if (trigger) positionPopoverFallback(pop, trigger);
-}
-
-async function onClick(e) {
-  const btn = e.target.closest("button");
-  if (!btn) return;
-  if (btn.classList.contains("popover-item")) {
-    btn.closest("[popover]")?.hidePopover?.();
-  }
-
-  try {
-    if (btn.id === "tasks-batch-toggle-btn") {
-      batchMode = !batchMode;
-      if (!batchMode) selectedIds.clear();
-      renderTable();
-    } else if (btn.id === "tasks-batch-exit-btn") {
-      batchMode = false;
-      selectedIds.clear();
-      renderTable();
-    } else if (btn.dataset.taskFilter) {
-      filterMode = btn.dataset.taskFilter;
-      hostEl.querySelectorAll("[data-task-filter]").forEach((b) => {
-        b.setAttribute("aria-pressed", b === btn ? "true" : "false");
-      });
-      renderTable();
-    } else if (btn.dataset.batchAction) {
-      const action = btn.dataset.batchAction;
-      const ids = [...selectedIds];
-      if (!ids.length) return;
+    batchBar.classList.remove("hidden");
+    const runBatch = async (action, label) => {
       if (action === "delete") {
-        const ok = await confirmDialog("批量删除任务", `确定删除选中的 ${ids.length} 个定时任务？历史运行记录仍会保留。`, {
-          confirmText: "删除",
+        const ok = await confirmModal({
+          title: "批量删除任务",
+          message: `确定永久删除选中的 ${selectedIds.size} 个定时任务吗？`,
+          okText: "删除",
           danger: true,
         });
         if (!ok) return;
       }
-      const res = await api("/api/tasks/batch", { method: "POST", body: { action, task_ids: ids } });
-      const verb = action === "enable" ? "启用" : action === "disable" ? "停用" : "删除";
-      showToast(`已批量${verb} ${res.affected} 个任务`);
-      if (action === "delete") selectedIds.clear();
-      await fetchAndRender();
-    } else if (btn.dataset.runTask || btn.dataset.simTask) {
-      const tid = btn.dataset.runTask || btn.dataset.simTask;
-      const sim = Boolean(btn.dataset.simTask);
-      const res = await api(`/api/tasks/${tid}/run`, { method: "POST", body: { simulate: sim } });
-      showToast(res.already_active ? `任务已在执行中 (Run #${res.run_id})` : `已入队 Run #${res.run_id}`);
-      navigate(`#/runs/${res.run_id}`);
-    } else if (btn.dataset.gotoTask) {
-      navigate(`#/tasks/${btn.dataset.gotoTask}`);
-    } else if (btn.dataset.deleteTask) {
-      const ok = await confirmDialog("删除定时任务", "确定删除此定时任务？历史运行记录仍会保留。", {
-        confirmText: "删除",
-        danger: true,
+      await api.post("/api/tasks/batch", {
+        action,
+        task_ids: [...selectedIds],
       });
-      if (!ok) return;
-      await api(`/api/tasks/${btn.dataset.deleteTask}`, { method: "DELETE" });
-      showToast("任务已删除");
-      await fetchAndRender();
+      toast(`已对 ${selectedIds.size} 个任务执行：${label}`);
+      selectedIds.clear();
+      await fetchData();
+      await ctx?.refreshHeader?.();
+      renderList();
+      renderBatchBar();
+    };
+
+    batchBar.append(
+      el("strong", { class: "sm" }, `已选择 ${selectedIds.size} 个任务`),
+      el(
+        "div",
+        { class: "row-actions", style: { marginInlineStart: "auto" } },
+        el("button", { type: "button", class: "fl-btn sm", onClick: () => runBatch("enable", "批量启用") }, "启用选中"),
+        el("button", { type: "button", class: "fl-btn sm", onClick: () => runBatch("disable", "批量暂停") }, "暂停选中"),
+        el("button", { type: "button", class: "fl-btn danger sm", onClick: () => runBatch("delete", "批量删除") }, "删除选中"),
+        el(
+          "button",
+          {
+            type: "button",
+            class: "fl-btn subtle sm",
+            onClick: () => {
+              selectedIds.clear();
+              renderList();
+              renderBatchBar();
+            },
+          },
+          "取消选择"
+        )
+      )
+    );
+  }
+
+  function renderCreateCard() {
+    createSlot.innerHTML = "";
+    if (!showCreateForm) return;
+
+    const nameIn = el("input", { type: "text", required: true, placeholder: "例如 Twitter 每日点赞增量" });
+    const cronIn = el("input", { type: "text", required: true, value: "0 */6 * * *", placeholder: "0 */6 * * *" });
+    const cronPreview = el("div", { class: "muted xs" }, "正在计算未来执行时间…");
+    const enabledIn = el("input", { type: "checkbox", role: "switch", switch: true, checked: true });
+    const urlsIn = el("textarea", { rows: 3, placeholder: "每行一个目标 URL，例如 https://x.com/..." });
+    const inputSel = el(
+      "select",
+      null,
+      el("option", { value: "" }, "不使用 NAS 链接文件"),
+      ...inputs.map((f) => {
+        const fn = typeof f === "string" ? f : f.filename || f.name;
+        return fn ? el("option", { value: fn }, fn) : null;
+      })
+    );
+
+    const optCtrl = createDownloadOptions({
+      overview,
+      getContextUrl: () => urlsIn.value,
+    });
+
+    const updateCronPreview = debounce(async () => {
+      const expr = cronIn.value.trim();
+      if (!expr) {
+        cronPreview.textContent = "请输入 Cron 表达式（5 段：分 时 日 月 周）";
+        return;
+      }
+      try {
+        const res = await api.post("/api/cron/preview", { cron_expr: expr });
+        const nextList = res?.next_runs || res?.times || [];
+        cronPreview.textContent = nextList.length
+          ? `未来执行：${nextList.slice(0, 3).map(fmtTimeShort).join(" 、")}`
+          : "Cron 表达式有效";
+      } catch (err) {
+        cronPreview.textContent = `表达式无效：${err.message}`;
+      }
+    }, 250);
+
+    cronIn.addEventListener("input", updateCronPreview);
+    urlsIn.addEventListener("input", () => optCtrl.refreshPreview());
+    updateCronPreview();
+
+    const submitBtn = el("button", { type: "submit", class: "fl-btn accent" }, "保存并创建任务");
+
+    const form = el(
+      "form",
+      {
+        class: "fl-card stack",
+        onSubmit: async (e) => {
+          e.preventDefault();
+          const urls = urlsIn.value
+            .split(/\r?\n/)
+            .map((l) => l.trim())
+            .filter((l) => l && !l.startsWith("#"));
+          const name = nameIn.value.trim();
+          const cron = cronIn.value.trim();
+          if (!name || !cron || (!urls.length && !inputSel.value)) {
+            toast("请填写任务名称、Cron 表达式，并至少提供一个 URL 或 NAS 输入文件", "danger");
+            return;
+          }
+          submitBtn.disabled = true;
+          try {
+            await api.post("/api/tasks", {
+              name,
+              cron_expr: cron,
+              enabled: enabledIn.checked,
+              urls,
+              input_file: inputSel.value || undefined,
+              ...optCtrl.getPayload(),
+            });
+            toast(`已创建定时任务「${name}」`);
+            showCreateForm = false;
+            renderCreateCard();
+            await fetchData();
+            await ctx?.refreshHeader?.();
+            renderList();
+          } catch (err) {
+            toast(`创建失败：${err.message}`, "danger");
+          } finally {
+            submitBtn.disabled = false;
+          }
+        },
+      },
+      el(
+        "div",
+        { class: "row-actions between" },
+        el("h2", { class: "fl-card-title", style: { margin: 0 } }, "新建定时任务"),
+        el(
+          "button",
+          {
+            type: "button",
+            class: "fl-btn subtle sm",
+            onClick: () => {
+              showCreateForm = false;
+              renderCreateCard();
+            },
+          },
+          "收起"
+        )
+      ),
+      el(
+        "div",
+        { class: "form-grid-2" },
+        el("div", { class: "field" }, el("label", null, "任务名称"), nameIn),
+        el("div", { class: "field" }, el("label", null, "Cron 调度表达式"), cronIn, cronPreview)
+      ),
+      el(
+        "div",
+        { class: "form-grid-2" },
+        el("div", { class: "field" }, el("label", null, "目标 URL（每行一个）"), urlsIn),
+        el(
+          "div",
+          { class: "stack sm-gap" },
+          el("div", { class: "field" }, el("label", null, "或绑定 NAS /data/inputs/ 文件"), inputSel),
+          el("label", { class: "switch-inline" }, enabledIn, el("span", null, "创建后立即启用自动调度"))
+        )
+      ),
+      el(
+        "details",
+        { class: "fl-expander", open: true },
+        el("summary", { class: "fl-expander-head" }, "高级下载与去重/后处理配置"),
+        el("div", { class: "fl-expander-body" }, optCtrl.el)
+      ),
+      el(
+        "div",
+        { class: "row-actions", style: { justifyContent: "flex-end" } },
+        el(
+          "button",
+          {
+            type: "button",
+            class: "fl-btn",
+            onClick: () => {
+              showCreateForm = false;
+              renderCreateCard();
+            },
+          },
+          "取消"
+        ),
+        submitBtn
+      )
+    );
+
+    createSlot.appendChild(form);
+  }
+
+  function renderList() {
+    listWrap.innerHTML = "";
+    const filtered = tasks.filter((t) => {
+      if (filterEnabled === "enabled" && !t.enabled) return false;
+      if (filterEnabled === "disabled" && t.enabled) return false;
+      if (query) {
+        const hay = `${t.name || ""} ${(t.urls || []).join(" ")} ${t.input_file || ""} ${t.cron_expr || ""}`.toLowerCase();
+        if (!hay.includes(query)) return false;
+      }
+      return true;
+    });
+
+    if (!filtered.length) {
+      listWrap.appendChild(
+        el("div", { class: "fl-card empty-state" }, tasks.length ? "没有匹配的定时任务" : "还没有配置任何定时任务，点击右上角「+ 新建定时任务」开始。")
+      );
+      return;
     }
-  } catch (err) {
-    showToast(err.message, "danger");
-  }
-}
 
-export function onEvent(ev) {
-  if (["tasks_changed", "run_finished", "poll_tick"].includes(ev.type)) {
-    debouncedReload();
-  }
-}
+    for (const t of filtered) {
+      const checked = selectedIds.has(t.id);
+      const urlSummary = t.input_file
+        ? `输入列表: ${t.input_file}`
+        : Array.isArray(t.urls) && t.urls.length
+          ? `${t.urls[0]}${t.urls.length > 1 ? ` (+${t.urls.length - 1})` : ""}`
+          : "未配置目标";
 
-export function unmount() {
-  unmounted = true;
-  if (hostEl) {
-    hostEl.removeEventListener("input", onInput);
-    hostEl.removeEventListener("change", onChange);
-    hostEl.removeEventListener("click", onClick);
-    hostEl.removeEventListener("toggle", onPopoverToggle, true);
+      const row = el(
+        "div",
+        { class: "fl-card stack sm-gap" },
+        el(
+          "div",
+          { class: "row-actions between" },
+          el(
+            "div",
+            { class: "row-actions", style: { minWidth: 0, flex: 1 } },
+            el("input", {
+              type: "checkbox",
+              checked,
+              "aria-label": `选择 ${t.name}`,
+              onChange: (e) => {
+                if (e.target.checked) selectedIds.add(t.id);
+                else selectedIds.delete(t.id);
+                renderBatchBar();
+              },
+            }),
+            el("input", {
+              type: "checkbox",
+              role: "switch",
+              switch: true,
+              checked: Boolean(t.enabled),
+              title: t.enabled ? "已启用：点击暂停" : "已暂停：点击启用",
+              onChange: async (e) => {
+                const next = e.target.checked;
+                try {
+                  await api.post(`/api/tasks/${t.id}/toggle`, {});
+                  t.enabled = next;
+                  toast(next ? `已启用「${t.name}」` : `已暂停「${t.name}」`);
+                  await ctx?.refreshHeader?.();
+                } catch (err) {
+                  e.target.checked = !next;
+                  toast(`切换失败：${err.message}`, "danger");
+                }
+              },
+            }),
+            el(
+              "div",
+              { style: { minWidth: 0, flex: 1 } },
+              el("a", { href: `#task/${t.id}`, style: { fontWeight: 600, fontSize: "0.95rem" } }, t.name || `任务 #${t.id}`),
+              el("div", { class: "muted xs", style: { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, urlSummary)
+            )
+          ),
+          el(
+            "div",
+            { class: "row-actions" },
+            t.last_run_status ? statusBadge(t.last_run_status) : el("span", { class: "fl-badge neutral" }, "尚未运行"),
+            el(
+              "button",
+              {
+                type: "button",
+                class: "fl-btn sm",
+                onClick: async () => {
+                  const res = await api.post(`/api/tasks/${t.id}/run`, { simulate: false });
+                  toast(res?.run_id ? `已启动 Run #${res.run_id}` : "已加入队列");
+                },
+              },
+              "立即运行"
+            ),
+            el(
+              "button",
+              {
+                type: "button",
+                class: "fl-btn subtle sm",
+                onClick: () => navigate(`#task/${t.id}`),
+              },
+              "编辑配置"
+            )
+          )
+        ),
+        el(
+          "div",
+          { class: "row-actions between muted xs" },
+          el("span", null, `Cron: ${t.cron_expr} · 下次执行: ${t.enabled ? relTime(t.next_run_at) : "已暂停"}`),
+          el(
+            "span",
+            null,
+            t.last_run_at ? `上次运行: ${fmtTimeShort(t.last_run_at)}` : "无历史运行记录",
+            t.last_run_id ? " · " : "",
+            t.last_run_id ? el("a", { href: `#runs/${t.last_run_id}` }, `Run #${t.last_run_id}`) : null
+          )
+        )
+      );
+      listWrap.appendChild(row);
+    }
   }
-  hostEl = null;
+
+  await fetchData();
+  if (destroyed) return;
+
+  page.append(
+    el(
+      "div",
+      { class: "row-actions between" },
+      el(
+        "div",
+        null,
+        el("h1", { class: "fl-page-title", style: { margin: 0, fontSize: "1.35rem" } }, "定时任务"),
+        el("div", { class: "muted xs" }, "基于 Cron 自动调度下载，支持批量启停、模拟试跑与精细配置覆盖")
+      ),
+      el(
+        "div",
+        { class: "row-actions" },
+        el(
+          "button",
+          {
+            type: "button",
+            class: "fl-btn accent sm",
+            onClick: () => {
+              showCreateForm = !showCreateForm;
+              renderCreateCard();
+            },
+          },
+          "+ 新建定时任务"
+        )
+      )
+    ),
+    el(
+      "div",
+      { class: "fl-card row-actions" },
+      el("input", {
+        type: "search",
+        style: { flex: 1, minInlineSize: "180px" },
+        placeholder: "搜索任务名、URL 或 Cron 表达式…",
+        onInput: (e) => {
+          query = e.target.value.trim().toLowerCase();
+          renderList();
+        },
+      }),
+      el(
+        "select",
+        {
+          "aria-label": "按状态筛选",
+          onChange: (e) => {
+            filterEnabled = e.target.value;
+            renderList();
+          },
+        },
+        el("option", { value: "all" }, "全部状态"),
+        el("option", { value: "enabled" }, "仅已启用"),
+        el("option", { value: "disabled" }, "仅已暂停")
+      )
+    ),
+    batchBar,
+    createSlot,
+    listWrap
+  );
+
+  renderList();
+  renderBatchBar();
+  container.replaceChildren(page);
+
+  const onEvt = async () => {
+    if (destroyed) return;
+    await fetchData().catch(() => {});
+    renderList();
+    renderBatchBar();
+  };
+  const unsub1 = events.on("tasks_changed", onEvt);
+  const unsub2 = events.on("run_finished", onEvt);
+
+  return () => {
+    destroyed = true;
+    unsub1();
+    unsub2();
+  };
 }

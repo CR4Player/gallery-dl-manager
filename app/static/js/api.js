@@ -1,63 +1,49 @@
-/** Fetch API wrapper with CSRF header, 401 redirect, and light shared caches. */
-
-const cache = {
-  sitesHealth: null,
-  configOverview: null,
-};
-
-export async function api(url, opts = {}) {
-  const headers = { "X-Requested-With": "fetch", ...(opts.headers || {}) };
-  const fetchOpts = { ...opts, headers };
-  if (fetchOpts.body && typeof fetchOpts.body !== "string" && !(fetchOpts.body instanceof FormData)) {
-    headers["Content-Type"] = "application/json";
-    fetchOpts.body = JSON.stringify(fetchOpts.body);
+/**
+ * Minimal fetch wrapper matching gallery-dl-manager CSRF & auth conventions.
+ */
+async function request(url, opts = {}) {
+  const method = (opts.method || "GET").toUpperCase();
+  const headers = { ...(opts.headers || {}) };
+  if (method !== "GET" && method !== "HEAD" && !opts.skipCsrf) {
+    headers["X-Requested-With"] = "fetch";
   }
-  const res = await fetch(url, fetchOpts);
-  if (res.status === 401) {
+
+  let body = opts.body;
+  if (body !== undefined && body !== null && typeof body === "object" && !(body instanceof FormData) && !(body instanceof Blob)) {
+    headers["Content-Type"] = headers["Content-Type"] || "application/json";
+    body = JSON.stringify(body);
+  }
+
+  const res = await fetch(url, {
+    ...opts,
+    method,
+    headers,
+    body,
+    credentials: "same-origin",
+  });
+
+  if (res.status === 401 && !opts.noAuthRedirect) {
     location.replace("/login");
     throw new Error("未登录或会话已过期");
   }
-  const text = await res.text();
-  let data = {};
-  try {
-    data = text ? JSON.parse(text) : {};
-  } catch {
-    data = { raw: text };
-  }
+
+  const ct = res.headers.get("content-type") || "";
+  const isJson = ct.includes("application/json");
+  const data = isJson ? await res.json().catch(() => null) : await res.text().catch(() => "");
+
   if (!res.ok) {
-    throw new Error(data.error || `请求失败 (${res.status})`);
+    const detail = (data && typeof data === "object" && (data.detail || data.message)) || (typeof data === "string" && data) || `HTTP ${res.status}`;
+    const err = new Error(detail);
+    err.status = res.status;
+    err.data = data;
+    throw err;
   }
   return data;
 }
 
-export function invalidateSharedCache() {
-  cache.sitesHealth = null;
-  cache.configOverview = null;
-}
-
-export async function getSitesHealth(force = false) {
-  if (!force && cache.sitesHealth) return cache.sitesHealth;
-  try {
-    const res = await api("/api/sites/health");
-    cache.sitesHealth = res.sites || [];
-  } catch {
-    const ov = await getConfigOverview(force);
-    cache.sitesHealth = (ov.sites || []).map((s) => ({
-      ...s,
-      configured: true,
-      domains: [`${s.site}.com`, s.site],
-      has_credentials: s.cookie_count > 0 || (s.auth_fields || []).length > 0,
-      task_ids: [],
-      task_names: [],
-      health: "unknown",
-    }));
-  }
-  return cache.sitesHealth;
-}
-
-export async function getConfigOverview(force = false) {
-  if (!force && cache.configOverview) return cache.configOverview;
-  const data = await api("/api/config/overview");
-  cache.configOverview = data;
-  return data;
-}
+export const api = {
+  get: (url, opts) => request(url, { ...opts, method: "GET" }),
+  post: (url, body, opts) => request(url, { ...opts, method: "POST", body }),
+  put: (url, body, opts) => request(url, { ...opts, method: "PUT", body }),
+  del: (url, body, opts) => request(url, { ...opts, method: "DELETE", body }),
+};

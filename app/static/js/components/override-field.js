@@ -1,126 +1,132 @@
-import { esc } from "../util.js";
+import { el } from "../util.js";
 
 /**
- * Light-DOM custom element for displaying inherited configuration values
- * with explicit one-click override and restore-to-inherited controls.
+ * Inherit-vs-Override control for tri-state task / download configuration fields.
+ * Value === null | undefined | "" (when allowEmptyFalse) means inherit global/site default.
  */
-class OverrideField extends HTMLElement {
-  constructor() {
-    super();
-    this._overriding = false;
-    this._value = "";
-    this._inherited = "";
-    this._source = "默认";
-    this._rendered = false;
-  }
+export function createOverrideField({
+  label,
+  value = null,
+  inheritedText = "全局/站点默认",
+  inheritedSource = "继承默认",
+  type = "text", // "text" | "number" | "select" | "boolean"
+  options = [],
+  placeholder = "",
+  defaultCustomValue = "",
+  min = undefined,
+  step = undefined,
+  onChange = () => {},
+}) {
+  let current = value === "" ? null : value;
+  const wrap = el("div", { class: "ov-wrap" });
 
-  connectedCallback() {
-    if (!this._rendered) {
-      this._inherited = this.getAttribute("inherited") || "";
-      this._source = this.getAttribute("source") || "默认";
-      this._value = this.getAttribute("value") || "";
-      this._overriding = Boolean(this._value);
-      this._render();
-      this._rendered = true;
+  const render = () => {
+    wrap.innerHTML = "";
+    const isCustom = current !== null && current !== undefined;
+
+    const head = el(
+      "div",
+      { class: "ov-head" },
+      el("span", { class: "ov-label" }, label),
+      isCustom
+        ? el(
+            "button",
+            {
+              type: "button",
+              class: "fl-btn subtle xs",
+              onClick: () => {
+                current = null;
+                render();
+                onChange(null);
+              },
+            },
+            "恢复继承"
+          )
+        : el(
+            "button",
+            {
+              type: "button",
+              class: "fl-btn subtle xs",
+              onClick: () => {
+                current = defaultCustomValue !== undefined ? defaultCustomValue : type === "boolean" ? true : "";
+                render();
+                onChange(current);
+              },
+            },
+            "覆盖"
+          )
+    );
+
+    wrap.appendChild(head);
+
+    if (!isCustom) {
+      wrap.appendChild(
+        el(
+          "div",
+          { class: "ov-inherited-row" },
+          el(
+            "div",
+            { class: "ov-inherited-val" },
+            el("span", { class: "fl-badge neutral" }, inheritedSource),
+            el("span", { class: "ov-inherited-text", title: String(inheritedText) }, String(inheritedText))
+          )
+        )
+      );
+      return;
     }
-  }
 
-  get value() {
-    return this._overriding ? this._value : "";
-  }
-
-  set value(val) {
-    this._value = String(val ?? "");
-    this._overriding = Boolean(this._value);
-    if (this._rendered) this._syncUI();
-  }
-
-  setInherited(inheritedText, sourceText) {
-    this._inherited = String(inheritedText ?? "");
-    this._source = String(sourceText ?? "默认");
-    if (this._rendered) {
-      const valEl = this.querySelector(".ov-inherited-text");
-      const srcEl = this.querySelector(".ov-source-tag");
-      if (valEl) valEl.textContent = this._inherited || "(未设置)";
-      if (srcEl) srcEl.textContent = `来自 ${this._source}`;
+    if (type === "select") {
+      const sel = el(
+        "select",
+        {
+          onChange: (e) => {
+            current = e.target.value;
+            onChange(current);
+          },
+        },
+        ...options.map((opt) =>
+          el("option", { value: opt.value, selected: String(opt.value) === String(current) }, opt.label)
+        )
+      );
+      wrap.appendChild(sel);
+    } else if (type === "boolean") {
+      const sel = el(
+        "select",
+        {
+          onChange: (e) => {
+            current = e.target.value === "true";
+            onChange(current);
+          },
+        },
+        el("option", { value: "true", selected: current === true }, "强制开启"),
+        el("option", { value: "false", selected: current === false }, "强制关闭")
+      );
+      wrap.appendChild(sel);
+    } else {
+      const inp = el("input", {
+        type: type === "number" ? "number" : "text",
+        value: current ?? "",
+        placeholder,
+        min,
+        step,
+        onInput: (e) => {
+          const raw = e.target.value;
+          current = type === "number" ? (raw === "" ? "" : Number(raw)) : raw;
+          onChange(current);
+        },
+      });
+      wrap.appendChild(inp);
     }
-  }
+  };
 
-  _render() {
-    const label = this.getAttribute("label") || "";
-    const placeholder = this.getAttribute("placeholder") || "";
-    const hint = this.getAttribute("hint") || "";
-    const inputId = `ov-${Math.random().toString(36).slice(2, 9)}`;
+  render();
 
-    this.innerHTML = `
-      <div class="ov-wrap">
-        <div class="ov-head">
-          <label class="ov-label" for="${inputId}">${esc(label)}</label>
-          <span class="ov-source-tag ${this._overriding ? "is-task" : ""}">
-            ${this._overriding ? "已覆盖" : `来自 ${esc(this._source)}`}
-          </span>
-        </div>
-        <div class="ov-inherited-row ${this._overriding ? "hidden" : ""}">
-          <span class="ov-inherited-val">
-            <span>继承：</span>
-            <code class="ov-inherited-text">${esc(this._inherited || "(未设置)")}</code>
-          </span>
-          <button type="button" class="btn ghost xs ov-override-btn">覆盖</button>
-        </div>
-        <div class="ov-editor ${this._overriding ? "" : "hidden"}">
-          <div class="input-with-btn">
-            <input id="${inputId}" type="text" class="ov-input" value="${esc(this._value)}" placeholder="${esc(placeholder)}">
-            <button type="button" class="btn ghost xs ov-restore-btn">恢复继承</button>
-          </div>
-        </div>
-        ${hint ? `<div class="hint">${esc(hint)}</div>` : ""}
-      </div>
-    `;
-
-    const inputEl = this.querySelector(".ov-input");
-    const overrideBtn = this.querySelector(".ov-override-btn");
-    const restoreBtn = this.querySelector(".ov-restore-btn");
-
-    overrideBtn.addEventListener("click", () => {
-      this._overriding = true;
-      this._syncUI();
-      inputEl.focus();
-    });
-
-    restoreBtn.addEventListener("click", () => {
-      this._value = "";
-      this._overriding = false;
-      inputEl.value = "";
-      this._syncUI();
-      this.dispatchEvent(new Event("change", { bubbles: true }));
-    });
-
-    inputEl.addEventListener("input", () => {
-      this._value = inputEl.value;
-      this.dispatchEvent(new Event("input", { bubbles: true }));
-    });
-
-    inputEl.addEventListener("change", () => {
-      this._value = inputEl.value;
-      this.dispatchEvent(new Event("change", { bubbles: true }));
-    });
-  }
-
-  _syncUI() {
-    const inhRow = this.querySelector(".ov-inherited-row");
-    const edRow = this.querySelector(".ov-editor");
-    const tag = this.querySelector(".ov-source-tag");
-    const inputEl = this.querySelector(".ov-input");
-    if (!inhRow || !edRow || !tag || !inputEl) return;
-
-    inhRow.classList.toggle("hidden", this._overriding);
-    edRow.classList.toggle("hidden", !this._overriding);
-    tag.classList.toggle("is-task", this._overriding);
-    tag.textContent = this._overriding ? "已覆盖" : `来自 ${this._source}`;
-    if (inputEl.value !== this._value) inputEl.value = this._value;
-  }
-}
-
-if (!customElements.get("override-field")) {
-  customElements.define("override-field", OverrideField);
+  return {
+    el: wrap,
+    getValue: () => current,
+    setValue: (v) => {
+      current = v === "" ? null : v;
+      render();
+    },
+  };
 }
