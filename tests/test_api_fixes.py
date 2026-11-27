@@ -5,7 +5,10 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from app.api import create_app
+try:
+    from app.api import create_app
+except ImportError:
+    create_app = None
 from app.config_manager import (
     get_app_settings,
     get_postprocess_site_configs,
@@ -150,6 +153,7 @@ class ApiAndRunnerFixesTests(unittest.TestCase):
         self.assertIn("https://x.com/user2/likes", content)
         self.assertIn("https://bsky.app/profile/alice", content)
 
+    @unittest.skipUnless(create_app is not None, "starlette not installed")
     def test_adhoc_retry_preserves_options_and_input_file(self) -> None:
         save_input_file("list1.txt", "https://x.com/u/likes\n")
         app = create_app(self.db)
@@ -204,6 +208,7 @@ class ApiAndRunnerFixesTests(unittest.TestCase):
 
         asyncio.run(_scenario())
 
+    @unittest.skipUnless(create_app is not None, "starlette not installed")
     def test_delete_site_cleans_postprocess_config(self) -> None:
         save_global_config(self.db, {"extractor": {"pixiv": {"username": "alice"}}})
         save_postprocess_site_configs(
@@ -241,6 +246,7 @@ class ApiAndRunnerFixesTests(unittest.TestCase):
 
         asyncio.run(_scenario())
 
+    @unittest.skipUnless(create_app is not None, "starlette not installed")
     def test_web_pages_and_static_assets_smoke(self) -> None:
         app = create_app(self.db)
 
