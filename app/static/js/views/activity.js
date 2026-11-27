@@ -47,7 +47,7 @@ async function renderActivity() {
         </div>
         <div class="row-actions">
           <a class="btn danger sm" href="#/sites/${encodeURIComponent(st.site)}">更新 Cookie</a>
-          ${st.last_auth_error_run_id ? `<a class="btn ghost sm" href="#/runs/${st.last_auth_error_run_id}">查看失败日志</a>` : ""}
+          ${st.last_auth_error_run_id ? `<a class="btn sm" href="#/runs/${st.last_auth_error_run_id}">查看失败日志</a>` : ""}
         </div>
       </article>
     `);
@@ -63,7 +63,7 @@ async function renderActivity() {
           <div class="muted sm">上次执行：${fmtTime(t.last_run_at)}</div>
         </div>
         <div class="row-actions">
-          <a class="btn ghost sm" href="#/tasks/${t.id}">查看任务</a>
+          <a class="btn sm" href="#/tasks/${t.id}">查看任务</a>
           <button type="button" class="btn primary sm" data-act-run-task="${t.id}">立即重试</button>
         </div>
       </article>
@@ -81,7 +81,7 @@ async function renderActivity() {
           <div class="muted sm">${esc(first.detail)}</div>
         </div>
         <div class="row-actions">
-          <a class="btn ghost sm" href="#/settings/notifications">检查通知配置</a>
+          <a class="btn sm" href="#/settings/notifications">检查通知配置</a>
         </div>
       </article>
     `);
@@ -97,7 +97,7 @@ async function renderActivity() {
             <div class="muted sm">+${r.downloaded_count} 新增 · ${r.skipped_count} 跳过 · 耗时 ${fmtDuration(r.duration_sec)}</div>
           </div>
           <div class="row-actions">
-            <a class="btn ghost sm" href="#/runs/${r.id}">实时日志</a>
+            <a class="btn sm" href="#/runs/${r.id}">实时日志</a>
             <button type="button" class="btn danger sm" data-act-cancel-run="${r.id}">中止</button>
           </div>
         </div>`
@@ -108,9 +108,9 @@ async function renderActivity() {
   const upcoming = dash.upcoming_tasks || [];
   let upcomingHtml = "";
   if (dash.scheduler_paused) {
-    upcomingHtml = `<div class="notice warn banner-row"><span class="sm">全局定时调度当前已暂停，可在右上角胶囊恢复。</span><a class="btn ghost sm" href="#/tasks">管理任务</a></div>`;
+    upcomingHtml = `<div class="notice warn banner-row"><span class="sm">全局定时调度当前已暂停，可在右上角胶囊恢复。</span><a class="btn sm" href="#/tasks">管理任务</a></div>`;
   } else if (!upcoming.length) {
-    upcomingHtml = `<div class="notice banner-row"><span class="muted sm">暂无已启用的定时任务。</span><a class="btn ghost sm" href="#/tasks">前往配置</a></div>`;
+    upcomingHtml = `<div class="notice banner-row"><span class="muted sm">暂无已启用的定时任务。</span><a class="btn sm" href="#/tasks">前往配置</a></div>`;
   } else {
     upcomingHtml = upcoming
       .map(
@@ -123,7 +123,7 @@ async function renderActivity() {
           </div>
           <div class="muted sm">${fmtTime(t.next_run_at)} · ${esc(t.cron_desc)}</div>
         </div>
-        <button type="button" class="btn ghost sm" data-act-run-task="${t.id}">立即执行</button>
+        <button type="button" class="btn sm" data-act-run-task="${t.id}">立即执行</button>
       </div>`
       )
       .join("");
@@ -139,7 +139,7 @@ async function renderActivity() {
         <p class="muted sm" style="margin:0.2rem 0 0;">当前队列状态、待处理异常与近期抓取活动</p>
       </div>
       <div class="row-actions">
-        <button type="button" class="btn ghost sm" id="act-refresh-btn">刷新</button>
+        <button type="button" class="btn sm" id="act-refresh-btn">刷新</button>
       </div>
     </div>
 
@@ -172,7 +172,7 @@ async function renderActivity() {
       <section class="card">
         <div class="card-head">
           <h2>正在运行与排队</h2>
-          <a class="btn ghost sm" href="#/runs">全部记录</a>
+          <a class="btn sm" href="#/runs">全部记录</a>
         </div>
         <div class="stack sm-gap">${activeHtml}</div>
 
@@ -196,7 +196,7 @@ async function renderActivity() {
       <section class="card">
         <div class="card-head">
           <h2>即将执行的定时任务</h2>
-          <a class="btn ghost sm" href="#/tasks">管理任务</a>
+          <a class="btn sm" href="#/tasks">管理任务</a>
         </div>
         <div class="stack sm-gap">${upcomingHtml}</div>
       </section>
@@ -205,7 +205,7 @@ async function renderActivity() {
     <section class="card">
       <div class="card-head">
         <h2>最近抓取记录</h2>
-        <a class="btn ghost sm" href="#/runs">查看全部</a>
+        <a class="btn sm" href="#/runs">查看全部</a>
       </div>
       <div tabindex="0" role="region" aria-labelledby="act-runs-cap" class="table-wrapper">
         <table class="data-table">

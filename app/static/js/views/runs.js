@@ -178,7 +178,7 @@ function renderErrorsSummary() {
     }
   }
   if (hasNetIssue) {
-    fixButtons.push(`<a class="btn ghost sm" href="#/settings/general">检查代理设置</a>`);
+    fixButtons.push(`<a class="btn sm" href="#/settings/general">检查代理设置</a>`);
   }
   if (r && !["queued", "running"].includes(r.status)) {
     fixButtons.push(`<button type="button" class="btn primary sm" data-retry-run="${r.id}">重试本次运行</button>`);
@@ -283,9 +283,9 @@ async function selectRun(runId) {
         <div class="row-actions">
           ${isLive
             ? `<button type="button" class="btn danger sm" data-cancel-run="${r.id}">中止任务</button>`
-            : `<button type="button" class="btn ghost sm" data-retry-run="${r.id}">重试</button>`}
-          <a class="btn ghost sm" href="/api/runs/${r.id}/log?download=1">下载日志</a>
-          <button type="button" class="btn ghost sm" id="run-copy-link-btn">复制链接</button>
+            : `<button type="button" class="btn sm" data-retry-run="${r.id}">重试</button>`}
+          <a class="btn sm" href="/api/runs/${r.id}/log?download=1">下载日志</a>
+          <button type="button" class="btn sm" id="run-copy-link-btn">复制链接</button>
         </div>
       </div>
 

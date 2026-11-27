@@ -137,14 +137,14 @@ function renderSettingsForm(task = null) {
           <span class="hint">若链接列表最新在前，日常增量建议 Skip 设为 <code>exit:10</code></span>
           <div class="input-with-btn">
             <select id="td-input-file"></select>
-            <button type="button" class="btn ghost sm" id="td-refresh-inputs-btn">刷新</button>
+            <button type="button" class="btn sm" id="td-refresh-inputs-btn">刷新</button>
           </div>
         </div>
         <div class="field">
           <label for="td-upload-file">上传 / 覆盖 .txt 列表文件</label>
           <div class="file-picker-row">
             <input id="td-upload-file" type="file" accept=".txt,text/plain" class="file-input">
-            <button type="button" class="btn ghost sm" id="td-upload-btn">上传到 NAS</button>
+            <button type="button" class="btn sm" id="td-upload-btn">上传到 NAS</button>
           </div>
         </div>
       </div>
@@ -156,12 +156,13 @@ function renderSettingsForm(task = null) {
 
       <div id="td-options-slot"></div>
 
-      <div class="row-actions between">
-        <label class="checkbox-inline">
-          <input type="checkbox" switch role="switch" class="switch-ok" id="td-enabled" ${task ? (task.enabled ? "checked" : "") : "checked"}> 启用定时调度
-        </label>
+      <div class="row-actions ${isNew ? "between" : ""}" style="${isNew ? "" : "justify-content:flex-end;"}">
+        ${isNew ? `
+          <label class="checkbox-inline">
+            <input type="checkbox" switch role="switch" class="switch-ok" id="td-enabled" checked> 启用定时调度
+          </label>` : ""}
         <div class="row-actions">
-          <a class="btn ghost" href="#/tasks">返回列表</a>
+          <a class="btn" href="#/tasks">返回列表</a>
           <button type="submit" class="btn primary">${isNew ? "创建任务" : "保存设置"}</button>
         </div>
       </div>
@@ -208,7 +209,7 @@ async function renderOverviewTab(detail, sitesHealth) {
                       ${healthBadge(info?.health || "unknown")}
                       <span class="muted xs">${info ? `Cookie: ${info.cookie_count}` : "未配置"}</span>
                     </div>
-                    <a class="btn ghost sm" href="#/sites/${encodeURIComponent(s)}">站点配置</a>
+                    <a class="btn sm" href="#/sites/${encodeURIComponent(s)}">站点配置</a>
                   </div>`;
               })
               .join("")
@@ -219,7 +220,7 @@ async function renderOverviewTab(detail, sitesHealth) {
     <section class="card">
       <div class="card-head">
         <h2>最近运行历史 (${runs.length})</h2>
-        <a class="btn ghost sm" href="#/runs">在运行中心查看</a>
+        <a class="btn sm" href="#/runs">在运行中心查看</a>
       </div>
       <div tabindex="0" role="region" aria-labelledby="td-runs-cap" class="table-wrapper">
         <table class="data-table">
@@ -329,7 +330,9 @@ function wireTaskForm(task = null) {
       urls: srcMode === "urls" ? urlsEl.value : "",
       input_file: srcMode === "input_file" ? inputSel.value : "",
       notes: document.getElementById("td-notes").value.trim(),
-      enabled: document.getElementById("td-enabled").checked,
+      enabled: task?.id
+        ? Boolean(document.getElementById("td-header-toggle")?.checked ?? task.enabled)
+        : Boolean(document.getElementById("td-enabled")?.checked ?? true),
       ...opts,
     };
     try {
@@ -393,7 +396,7 @@ async function loadAndRender(taskId) {
           <span class="sm">${t.enabled ? "已启用" : "已停用"}</span>
         </label>
         <button type="button" class="btn primary sm" id="td-run-now-btn">立即执行</button>
-        <button type="button" class="btn ghost sm" id="td-sim-btn">模拟试跑</button>
+        <button type="button" class="btn sm" id="td-sim-btn">模拟试跑</button>
         <button type="button" class="btn danger sm" id="td-delete-btn">删除任务</button>
       </div>
     </div>
@@ -403,7 +406,7 @@ async function loadAndRender(taskId) {
       <button type="button" class="subtab-btn ${activeTab === "settings" ? "active" : ""}" role="tab" aria-selected="${activeTab === "settings"}" data-td-tab="settings">任务设置与生效配置</button>
     </div>
 
-    <div id="td-tab-body">
+    <div id="td-tab-body" class="stack lg-gap">
       ${activeTab === "overview" ? overviewHtml : renderSettingsForm(t)}
     </div>
   `;

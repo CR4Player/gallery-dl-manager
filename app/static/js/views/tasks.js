@@ -158,7 +158,7 @@ export async function mount(el) {
         <p class="muted sm" style="margin:0.2rem 0 0;">查看近期健康走势、启停调度，点开任务名称可管理详情与继承配置</p>
       </div>
       <div class="row-actions">
-        <button type="button" class="btn ghost" id="tasks-batch-toggle-btn">批量管理</button>
+        <button type="button" class="btn" id="tasks-batch-toggle-btn">批量管理</button>
         <a class="btn primary" href="#/tasks/new">＋ 新建任务</a>
       </div>
     </div>
@@ -180,8 +180,8 @@ export async function mount(el) {
           <span id="tasks-batch-count" class="muted sm">已选 0 项</span>
         </div>
         <div class="row-actions">
-          <button type="button" class="btn ghost sm" data-batch-action="enable">批量启用</button>
-          <button type="button" class="btn ghost sm" data-batch-action="disable">批量停用</button>
+          <button type="button" class="btn sm" data-batch-action="enable">批量启用</button>
+          <button type="button" class="btn sm" data-batch-action="disable">批量停用</button>
           <button type="button" class="btn danger sm" data-batch-action="delete">批量删除</button>
           <button type="button" class="btn ghost sm" id="tasks-batch-exit-btn">退出多选</button>
         </div>

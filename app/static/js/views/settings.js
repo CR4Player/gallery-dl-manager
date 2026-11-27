@@ -48,7 +48,7 @@ async function renderGeneral(pane) {
             <span class="hint">宿主机代理可用 <code>http://host.docker.internal:端口</code>，直连留空</span>
             <div class="input-with-btn">
               <input id="cfg-global-proxy" type="text" value="${esc(s.global_proxy || "")}" placeholder="例如 http://host.docker.internal:7890">
-              <button type="button" class="btn ghost" id="test-proxy-btn">测试连通</button>
+              <button type="button" class="btn" id="test-proxy-btn">测试连通</button>
             </div>
             <div id="proxy-test-result" class="sm muted"></div>
           </div>
@@ -200,7 +200,7 @@ async function renderNotifications(pane) {
             <div class="field"><label for="tg-token">Bot Token</label><input id="tg-token" type="password" value="${esc(c.telegram?.bot_token || "")}" placeholder="123456:ABC-DEF..."></div>
             <div class="field"><label for="tg-chat">Chat ID</label><input id="tg-chat" type="text" value="${esc(c.telegram?.chat_id || "")}" placeholder="123456789"></div>
             <div class="field"><label for="tg-base">API Base</label><input id="tg-base" type="url" value="${esc(c.telegram?.api_base || "https://api.telegram.org")}"></div>
-            <button type="button" class="btn ghost sm test-channel-btn" data-channel="telegram">发送 Telegram 测试</button>
+            <button type="button" class="btn sm test-channel-btn" data-channel="telegram">发送 Telegram 测试</button>
           </section>
 
           <section class="card stack sm-gap">
@@ -210,7 +210,7 @@ async function renderNotifications(pane) {
             </div>
             <div class="field"><label for="fs-url">Webhook URL</label><input id="fs-url" type="url" value="${esc(c.feishu?.webhook_url || "")}" placeholder="https://open.feishu.cn/..."></div>
             <div class="field"><label for="fs-secret">签名密钥 Secret</label><input id="fs-secret" type="password" value="${esc(c.feishu?.secret || "")}"></div>
-            <button type="button" class="btn ghost sm test-channel-btn" data-channel="feishu">发送飞书测试</button>
+            <button type="button" class="btn sm test-channel-btn" data-channel="feishu">发送飞书测试</button>
           </section>
 
           <section class="card stack sm-gap">
@@ -221,7 +221,7 @@ async function renderNotifications(pane) {
             <div class="field"><label for="bk-server">Server URL</label><input id="bk-server" type="url" value="${esc(c.bark?.server_url || "https://api.day.app")}"></div>
             <div class="field"><label for="bk-key">Device Key</label><input id="bk-key" type="password" value="${esc(c.bark?.device_key || "")}"></div>
             <div class="field"><label for="bk-group">推送分组</label><input id="bk-group" type="text" value="${esc(c.bark?.group || "gallery-dl")}"></div>
-            <button type="button" class="btn ghost sm test-channel-btn" data-channel="bark">发送 Bark 测试</button>
+            <button type="button" class="btn sm test-channel-btn" data-channel="bark">发送 Bark 测试</button>
           </section>
 
           <section class="card stack sm-gap">
@@ -231,7 +231,7 @@ async function renderNotifications(pane) {
             </div>
             <div class="field"><label for="wh-url">Webhook URL</label><input id="wh-url" type="url" value="${esc(c.webhook?.url || "")}" placeholder="https://example.com/hook"></div>
             <div class="field"><label for="wh-headers">自定义 Headers (JSON)</label><textarea id="wh-headers" rows="2">${esc(c.webhook?.headers_json || "{}")}</textarea></div>
-            <button type="button" class="btn ghost sm test-channel-btn" data-channel="webhook">发送 Webhook 测试</button>
+            <button type="button" class="btn sm test-channel-btn" data-channel="webhook">发送 Webhook 测试</button>
           </section>
         </div>
 
@@ -421,10 +421,10 @@ async function renderIntegrations(pane) {
 
         <div class="row-actions between">
           <div class="row-actions">
-            <button type="button" class="btn ghost sm" id="tw-scan-disk-btn">扫描 /gallery-dl/twitter 目录</button>
+            <button type="button" class="btn sm" id="tw-scan-disk-btn">扫描 /gallery-dl/twitter 目录</button>
             <div class="file-picker-row">
               <input id="tw-likejs-file" type="file" accept=".js,.json,.txt" class="file-input">
-              <button type="button" class="btn ghost sm" id="tw-import-likejs-btn">导入 X 官方 like.js</button>
+              <button type="button" class="btn sm" id="tw-import-likejs-btn">导入 X 官方 like.js</button>
             </div>
           </div>
         </div>
@@ -589,7 +589,7 @@ async function renderAdvanced(pane) {
                     <td data-label="ID">#${s.id}</td>
                     <td data-label="时间">${fmtTime(s.created_at)}</td>
                     <td data-label="备注">${esc(s.note)}</td>
-                    <td data-label="操作"><button type="button" class="btn ghost sm" data-restore-snap="${s.id}">回滚至此版本</button></td>
+                    <td data-label="操作"><button type="button" class="btn sm" data-restore-snap="${s.id}">回滚至此版本</button></td>
                   </tr>`
                     )
                     .join("")
