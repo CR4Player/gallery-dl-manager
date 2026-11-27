@@ -8,7 +8,6 @@ import {
   fmtTime,
   fmtTimeShort,
   fmtDuration,
-  fmtBytes,
 } from "../util.js";
 import { navigate } from "../router.js";
 import { createLogViewer } from "../components/log-viewer.js";
@@ -49,9 +48,10 @@ export async function renderRuns(container, route, ctx) {
 
     const res = await api.get(`/api/runs?${params.toString()}`);
     if (destroyed) return;
-    const items = res?.runs || res?.items || (Array.isArray(res) ? res : []);
+    const items = Array.isArray(res?.runs) ? res.runs : [];
     runs = append ? [...runs, ...items] : items;
-    hasMore = Boolean(res?.has_more ?? items.length >= 30);
+    const total = Number(res?.total ?? items.length);
+    hasMore = runs.length < total && items.length >= 30;
     loadMoreBtn.classList.toggle("hidden", !hasMore);
 
     if (!selectedId && runs.length && window.innerWidth >= 880) {
@@ -63,7 +63,7 @@ export async function renderRuns(container, route, ctx) {
     listCardsEl.innerHTML = "";
     const filtered = runs.filter((r) => {
       if (!searchQuery) return true;
-      const hay = `${r.id} ${r.task_name || ""} ${r.label || ""} ${r.trigger_source || ""}`.toLowerCase();
+      const hay = `${r.id} ${r.task_name || ""} ${r.trigger_type || ""}`.toLowerCase();
       return hay.includes(searchQuery);
     });
 
@@ -74,8 +74,8 @@ export async function renderRuns(container, route, ctx) {
 
     for (const r of filtered) {
       const isActive = String(r.id) === String(selectedId);
-      const titleText = `#${r.id} ${r.task_name || r.label || "即时下载"}`;
-      const metaText = `+${r.files_downloaded ?? 0} 新增 · ${r.files_skipped ?? 0} 跳过 · ${fmtTimeShort(r.created_at)}`;
+      const titleText = `#${r.id} ${r.task_name || "即时下载"}`;
+      const metaText = `+${r.downloaded_count ?? 0} 新增 · ${r.skipped_count ?? 0} 跳过 · ${fmtTimeShort(r.created_at)}`;
       listCardsEl.appendChild(
         el(
           "a",
@@ -111,21 +111,23 @@ export async function renderRuns(container, route, ctx) {
     }
     detailPaneEl.replaceChildren(el("div", { class: "fl-infobar" }, `正在载入 Run #${runId} 详情与日志…`));
 
-    let run = null;
+    let detail = null;
     try {
-      const res = await api.get(`/api/runs/${encodeURIComponent(runId)}`);
-      run = res?.run || res;
+      detail = await api.get(`/api/runs/${encodeURIComponent(runId)}`);
     } catch (err) {
       detailPaneEl.replaceChildren(el("div", { class: "fl-infobar danger" }, `读取运行详情失败：${err.message}`));
       return;
     }
     if (destroyed || String(selectedId) !== String(runId)) return;
 
+    const run = detail?.run || detail;
+    const filesList = Array.isArray(detail?.files) ? detail.files : [];
     const isLive = ACTIVE_STATUSES.has(run.status);
-    const statDownloaded = el("strong", null, String(run.files_downloaded ?? 0));
-    const statSkipped = el("strong", null, String(run.files_skipped ?? 0));
-    const statFailed = el("strong", null, String(run.files_failed ?? 0));
-    const statDuration = el("strong", null, isLive ? "进行中" : fmtDuration(run.duration_seconds));
+
+    const statDownloaded = el("strong", null, String(run.downloaded_count ?? 0));
+    const statSkipped = el("strong", null, String(run.skipped_count ?? 0));
+    const statWarn = el("strong", null, String(run.postprocess_warn ?? 0));
+    const statDuration = el("strong", null, isLive ? "进行中" : fmtDuration(run.duration_sec));
 
     const headerActions = el("div", { class: "row-actions" });
     if (isLive) {
@@ -172,6 +174,43 @@ export async function renderRuns(container, route, ctx) {
     const viewer = createLogViewer({ runId: run.id });
     activeViewer = viewer;
 
+    const truncNotice = detail?.log_truncated
+      ? el(
+          "div",
+          { class: "fl-infobar sm", style: { justifyContent: "space-between" } },
+          el("span", null, "日志较长，当前仅显示末尾 500 行摘要。"),
+          el(
+            "button",
+            {
+              type: "button",
+              class: "fl-btn subtle xs",
+              onClick: async () => {
+                const raw = await api.get(`/api/runs/${encodeURIComponent(run.id)}/log`);
+                const lines = String(raw || "").split(/\r?\n/);
+                viewer.setLines(lines.filter((l, idx, arr) => idx < arr.length - 1 || l !== ""));
+                truncNotice.classList.add("hidden");
+              },
+            },
+            "加载完整日志"
+          )
+        )
+      : null;
+
+    const filesCard = filesList.length
+      ? el(
+          "details",
+          { class: "fl-expander" },
+          el("summary", { class: "fl-expander-head" }, `本次下载文件清单 (${filesList.length})`),
+          el(
+            "div",
+            { class: "fl-expander-body stack xs-gap", style: { maxBlockSize: "200px", overflow: "auto" } },
+            ...filesList.slice(0, 100).map((f) =>
+              el("div", { class: "xs muted", style: { fontFamily: "var(--fl-mono)", wordBreak: "break-all" } }, f.file_path || "")
+            )
+          )
+        )
+      : null;
+
     const detailBody = el(
       "div",
       { class: "stack" },
@@ -191,17 +230,17 @@ export async function renderRuns(container, route, ctx) {
             "← 列表"
           ),
           statusBadge(run.status),
-          el("h2", { style: { margin: 0, fontSize: "1.1rem" } }, `#${run.id} ${run.task_name || run.label || "下载运行"}`)
+          el("h2", { style: { margin: 0, fontSize: "1.1rem" } }, `#${run.id} ${run.task_name || "下载运行"}`)
         ),
         headerActions
       ),
       el(
         "div",
-        { class: "muted xs row-actions", style: { gap: "0.75rem" } },
-        el("span", null, `触发方式: ${run.trigger_source || (run.simulate ? "模拟试跑" : "手动/定时")}`),
+        { class: "muted xs row-actions", style: { gap: "0.75rem", flexWrap: "wrap" } },
+        el("span", null, `触发方式: ${run.trigger_type || "manual"}${run.simulate ? " (模拟)" : ""}`),
         el("span", null, `开始: ${fmtTime(run.started_at || run.created_at)}`),
         run.finished_at ? el("span", null, `结束: ${fmtTime(run.finished_at)}`) : null,
-        run.bytes_downloaded ? el("span", null, `流量: ${fmtBytes(run.bytes_downloaded)}`) : null
+        run.exit_code !== null && run.exit_code !== undefined ? el("span", null, `ExitCode: ${run.exit_code}`) : null
       ),
       run.error_summary
         ? el("div", { class: "fl-infobar danger sm" }, run.error_summary)
@@ -211,9 +250,11 @@ export async function renderRuns(container, route, ctx) {
         { class: "stats-grid" },
         el("div", { class: "fl-stat-card ok" }, el("span", { class: "fl-stat-label" }, "新增下载"), statDownloaded),
         el("div", { class: "fl-stat-card" }, el("span", { class: "fl-stat-label" }, "Archive / 已存在跳过"), statSkipped),
-        el("div", { class: `fl-stat-card${(run.files_failed || 0) > 0 ? " err" : ""}` }, el("span", { class: "fl-stat-label" }, "错误数量"), statFailed),
+        el("div", { class: `fl-stat-card${(run.postprocess_warn || 0) > 0 ? " warn" : ""}` }, el("span", { class: "fl-stat-label" }, "后处理告警"), statWarn),
         el("div", { class: "fl-stat-card" }, el("span", { class: "fl-stat-label" }, "执行耗时"), statDuration)
       ),
+      filesCard,
+      truncNotice,
       viewer.el
     );
 
@@ -223,49 +264,41 @@ export async function renderRuns(container, route, ctx) {
       const es = new EventSource(`/api/runs/${encodeURIComponent(run.id)}/stream?tail=800`);
       activeEs = es;
 
-      es.addEventListener("log_snapshot", (ev) => {
+      // Backend /api/runs/{id}/stream emits unnamed `data: {"type": "...", ...}` frames
+      es.onmessage = (ev) => {
+        if (!ev.data) return;
+        let d = null;
         try {
-          const d = JSON.parse(ev.data);
-          viewer.setLines(d?.lines || []);
+          d = JSON.parse(ev.data);
         } catch {
-          // ignore
+          viewer.appendLines([ev.data]);
+          return;
         }
-      });
-      es.addEventListener("log", (ev) => {
-        try {
-          const d = JSON.parse(ev.data);
-          const lines = d?.lines || (d?.line !== undefined ? [d.line] : []);
+        if (d.type === "log_snapshot") {
+          viewer.setLines(d.lines || []);
+        } else if (d.type === "log") {
+          const lines = d.lines || (d.line !== undefined ? [d.line] : []);
           if (lines.length) viewer.appendLines(lines);
-        } catch {
-          if (ev.data) viewer.appendLines([ev.data]);
+        } else if (d.type === "stats") {
+          if (d.downloaded_count !== undefined) statDownloaded.textContent = String(d.downloaded_count);
+          if (d.skipped_count !== undefined) statSkipped.textContent = String(d.skipped_count);
+          if (d.postprocess_warn !== undefined) statWarn.textContent = String(d.postprocess_warn);
+          if (d.duration_sec !== undefined) statDuration.textContent = fmtDuration(d.duration_sec);
+        } else if (d.type === "done") {
+          es.close();
+          activeEs = null;
+          fetchRuns(false).then(renderRunList).catch(() => {});
+          loadRunDetail(run.id);
+          ctx?.refreshHeader?.();
         }
-      });
-      es.addEventListener("stats", (ev) => {
-        try {
-          const st = JSON.parse(ev.data);
-          if (st.files_downloaded !== undefined) statDownloaded.textContent = String(st.files_downloaded);
-          if (st.files_skipped !== undefined) statSkipped.textContent = String(st.files_skipped);
-          if (st.files_failed !== undefined) statFailed.textContent = String(st.files_failed);
-        } catch {
-          // ignore
-        }
-      });
-      es.addEventListener("done", () => {
-        es.close();
-        activeEs = null;
-        fetchRuns(false).then(renderRunList).catch(() => {});
-        loadRunDetail(run.id);
-        ctx?.refreshHeader?.();
-      });
+      };
+    } else if (Array.isArray(detail?.log_lines) && detail.log_lines.length) {
+      viewer.setLines(detail.log_lines);
     } else {
       try {
-        const logRes = await api.get(`/api/runs/${encodeURIComponent(run.id)}/log`);
+        const rawLog = await api.get(`/api/runs/${encodeURIComponent(run.id)}/log`);
         if (destroyed || String(selectedId) !== String(run.id)) return;
-        const rawLines = Array.isArray(logRes?.lines)
-          ? logRes.lines
-          : typeof logRes === "string"
-            ? logRes.split(/\r?\n/)
-            : (logRes?.content || "").split(/\r?\n/);
+        const rawLines = typeof rawLog === "string" ? rawLog.split(/\r?\n/) : [];
         viewer.setLines(rawLines.filter((l, i, arr) => i < arr.length - 1 || l !== ""));
       } catch (err) {
         viewer.setLines([`[err] 读取日志失败: ${err.message}`]);
@@ -294,7 +327,7 @@ export async function renderRuns(container, route, ctx) {
     el("option", { value: "partial", selected: statusFilter === "partial" }, "部分失败"),
     el("option", { value: "auth_error", selected: statusFilter === "auth_error" }, "认证失效"),
     el("option", { value: "failed", selected: statusFilter === "failed" }, "失败"),
-    el("option", { value: "canceled", selected: statusFilter === "canceled" }, "已中止")
+    el("option", { value: "cancelled", selected: statusFilter === "cancelled" }, "已中止")
   );
 
   loadMoreBtn.addEventListener("click", async () => {
@@ -332,7 +365,7 @@ export async function renderRuns(container, route, ctx) {
           "div",
           null,
           el("h1", { class: "fl-page-title", style: { margin: 0, fontSize: "1.35rem" } }, "运行与日志"),
-          el("div", { class: "muted xs" }, "主从双栏视图 · 支持 5000+ 行虚拟化日志滚动与实时 SSE 推送")
+          el("div", { class: "muted xs" }, "主从双栏视图 · 支持虚拟化日志滚动与实时 SSE 推送")
         ),
         el(
           "button",

@@ -253,7 +253,7 @@
         });
         const data = await res.json().catch(() => ({}));
         if (!res.ok) {
-          showBanner(data.detail || `认证失败 (HTTP ${res.status})`);
+          showBanner(data.error || data.detail || `认证失败 (HTTP ${res.status})`);
           return;
         }
         location.replace("/");

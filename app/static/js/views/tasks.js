@@ -8,6 +8,7 @@ import {
   fmtTimeShort,
   relTime,
   debounce,
+  SITE_LABELS,
 } from "../util.js";
 import { navigate } from "../router.js";
 import { createDownloadOptions } from "../components/download-options.js";
@@ -17,9 +18,9 @@ export async function renderTasks(container, _route, ctx) {
   let tasks = [];
   let inputs = [];
   let overview = null;
-  let selectedIds = new Set();
+  const selectedIds = new Set();
   let query = "";
-  let filterEnabled = "all"; // "all" | "enabled" | "disabled"
+  let filterEnabled = "all";
   let showCreateForm = false;
 
   const page = el("div", { class: "stack" });
@@ -34,8 +35,8 @@ export async function renderTasks(container, _route, ctx) {
       api.get("/api/config/overview").catch(() => null),
     ]);
     if (destroyed) return;
-    tasks = tasksRes?.tasks || tasksRes?.items || (Array.isArray(tasksRes) ? tasksRes : []);
-    inputs = inputsRes?.files || inputsRes?.items || (Array.isArray(inputsRes) ? inputsRes : []);
+    tasks = Array.isArray(tasksRes?.tasks) ? tasksRes.tasks : [];
+    inputs = Array.isArray(inputsRes?.files) ? inputsRes.files : [];
     overview = overviewRes;
   }
 
@@ -107,14 +108,16 @@ export async function renderTasks(container, _route, ctx) {
       null,
       el("option", { value: "" }, "不使用 NAS 链接文件"),
       ...inputs.map((f) => {
-        const fn = typeof f === "string" ? f : f.filename || f.name;
-        return fn ? el("option", { value: fn }, fn) : null;
+        const fn = typeof f === "string" ? f : f.name || f.filename;
+        return fn ? el("option", { value: fn }, `${fn}${f.url_count ? ` (${f.url_count} 条)` : ""}`) : null;
       })
     );
+    const notesIn = el("input", { type: "text", placeholder: "备注信息（可选）" });
 
     const optCtrl = createDownloadOptions({
       overview,
-      getContextUrl: () => urlsIn.value,
+      getContextUrls: () => urlsIn.value,
+      getInputFile: () => inputSel.value,
     });
 
     const updateCronPreview = debounce(async () => {
@@ -125,10 +128,10 @@ export async function renderTasks(container, _route, ctx) {
       }
       try {
         const res = await api.post("/api/cron/preview", { cron_expr: expr });
-        const nextList = res?.next_runs || res?.times || [];
+        const nextList = res?.next_runs || [];
         cronPreview.textContent = nextList.length
-          ? `未来执行：${nextList.slice(0, 3).map(fmtTimeShort).join(" 、")}`
-          : "Cron 表达式有效";
+          ? `${res.description || ""} · 未来触发：${nextList.slice(0, 3).join(" / ")}`
+          : res?.description || "Cron 表达式有效";
       } catch (err) {
         cronPreview.textContent = `表达式无效：${err.message}`;
       }
@@ -136,6 +139,7 @@ export async function renderTasks(container, _route, ctx) {
 
     cronIn.addEventListener("input", updateCronPreview);
     urlsIn.addEventListener("input", () => optCtrl.refreshPreview());
+    inputSel.addEventListener("change", () => optCtrl.refreshPreview());
     updateCronPreview();
 
     const submitBtn = el("button", { type: "submit", class: "fl-btn accent" }, "保存并创建任务");
@@ -163,7 +167,8 @@ export async function renderTasks(container, _route, ctx) {
               cron_expr: cron,
               enabled: enabledIn.checked,
               urls,
-              input_file: inputSel.value || undefined,
+              input_file: inputSel.value || "",
+              notes: notesIn.value.trim(),
               ...optCtrl.getPayload(),
             });
             toast(`已创建定时任务「${name}」`);
@@ -210,6 +215,7 @@ export async function renderTasks(container, _route, ctx) {
           "div",
           { class: "stack sm-gap" },
           el("div", { class: "field" }, el("label", null, "或绑定 NAS /data/inputs/ 文件"), inputSel),
+          el("div", { class: "field" }, el("label", null, "备注"), notesIn),
           el("label", { class: "switch-inline" }, enabledIn, el("span", null, "创建后立即启用自动调度"))
         )
       ),
@@ -268,6 +274,10 @@ export async function renderTasks(container, _route, ctx) {
           ? `${t.urls[0]}${t.urls.length > 1 ? ` (+${t.urls.length - 1})` : ""}`
           : "未配置目标";
 
+      const recentStatuses = Array.isArray(t.recent_statuses) ? t.recent_statuses : [];
+      const nextAt = Array.isArray(t.next_runs) && t.next_runs.length ? t.next_runs[0] : null;
+      const sitesList = Array.isArray(t.sites) ? t.sites : [];
+
       const row = el(
         "div",
         { class: "fl-card stack sm-gap" },
@@ -316,7 +326,20 @@ export async function renderTasks(container, _route, ctx) {
           el(
             "div",
             { class: "row-actions" },
-            t.last_run_status ? statusBadge(t.last_run_status) : el("span", { class: "fl-badge neutral" }, "尚未运行"),
+            ...sitesList.slice(0, 3).map((s) => el("span", { class: "fl-badge neutral" }, SITE_LABELS[s] || s)),
+            recentStatuses.length
+              ? el(
+                  "div",
+                  { class: "health-bars", title: "最近运行历史" },
+                  ...recentStatuses.map((rs) =>
+                    el("span", {
+                      class: `health-bar ${rs.status}`,
+                      title: `#${rs.id} ${rs.status} (+${rs.downloaded_count ?? 0})`,
+                    })
+                  )
+                )
+              : null,
+            t.last_status ? statusBadge(t.last_status) : el("span", { class: "fl-badge neutral" }, "尚未运行"),
             el(
               "button",
               {
@@ -343,11 +366,11 @@ export async function renderTasks(container, _route, ctx) {
         el(
           "div",
           { class: "row-actions between muted xs" },
-          el("span", null, `Cron: ${t.cron_expr} · 下次执行: ${t.enabled ? relTime(t.next_run_at) : "已暂停"}`),
+          el("span", null, `调度：${t.cron_desc || t.cron_expr} (${t.cron_expr}) · 下次执行：${t.enabled && nextAt ? relTime(nextAt) : t.enabled ? "已排程" : "已暂停"}`),
           el(
             "span",
             null,
-            t.last_run_at ? `上次运行: ${fmtTimeShort(t.last_run_at)}` : "无历史运行记录",
+            t.last_run_at ? `上次运行：${fmtTimeShort(t.last_run_at)}` : "无历史运行记录",
             t.last_run_id ? " · " : "",
             t.last_run_id ? el("a", { href: `#runs/${t.last_run_id}` }, `Run #${t.last_run_id}`) : null
           )

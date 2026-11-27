@@ -32,7 +32,7 @@ async function request(url, opts = {}) {
   const data = isJson ? await res.json().catch(() => null) : await res.text().catch(() => "");
 
   if (!res.ok) {
-    const detail = (data && typeof data === "object" && (data.detail || data.message)) || (typeof data === "string" && data) || `HTTP ${res.status}`;
+    const detail = (data && typeof data === "object" && (data.error || data.detail || data.message)) || (typeof data === "string" && data) || `HTTP ${res.status}`;
     const err = new Error(detail);
     err.status = res.status;
     err.data = data;

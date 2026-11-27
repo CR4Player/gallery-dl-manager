@@ -8,6 +8,7 @@ import {
   fmtDuration,
   relTime,
   debounce,
+  SITE_LABELS,
 } from "../util.js";
 import { navigate } from "../router.js";
 import { createDownloadOptions } from "../components/download-options.js";
@@ -23,8 +24,8 @@ export async function renderTaskDetail(container, route, ctx) {
     api.get("/api/config/overview").catch(() => null),
   ]);
 
-  const list = tasksRes?.tasks || tasksRes?.items || (Array.isArray(tasksRes) ? tasksRes : []);
-  const task = detailRes?.task || detailRes || list.find((t) => String(t.id) === String(taskId));
+  const list = Array.isArray(tasksRes?.tasks) ? tasksRes.tasks : [];
+  const task = detailRes?.task || list.find((t) => String(t.id) === String(taskId));
 
   if (!task) {
     container.replaceChildren(
@@ -38,12 +39,27 @@ export async function renderTaskDetail(container, route, ctx) {
     return;
   }
 
-  const inputs = inputsRes?.files || inputsRes?.items || (Array.isArray(inputsRes) ? inputsRes : []);
-  const taskRuns = runsRes?.runs || runsRes?.items || task.recent_runs || [];
+  const inputs = Array.isArray(inputsRes?.files) ? inputsRes.files : [];
+  const taskRuns = Array.isArray(detailRes?.recent_runs)
+    ? detailRes.recent_runs
+    : Array.isArray(runsRes?.runs)
+      ? runsRes.runs
+      : [];
+  const health = detailRes?.health || {};
+  const matchedSites = Array.isArray(detailRes?.sites)
+    ? detailRes.sites
+    : Array.isArray(task.sites)
+      ? task.sites
+      : [];
 
+  const nextAt = Array.isArray(task.next_runs) && task.next_runs.length ? task.next_runs[0] : null;
   const nameIn = el("input", { type: "text", required: true, value: task.name || "" });
   const cronIn = el("input", { type: "text", required: true, value: task.cron_expr || "" });
-  const cronHint = el("div", { class: "muted xs" }, task.next_run_at ? `当前下次执行: ${relTime(task.next_run_at)}` : "");
+  const cronHint = el(
+    "div",
+    { class: "muted xs" },
+    `${task.cron_desc || ""}${nextAt ? ` · 下次执行: ${relTime(nextAt)}` : ""}`
+  );
   const enabledIn = el("input", { type: "checkbox", role: "switch", switch: true, checked: Boolean(task.enabled) });
   const urlsIn = el("textarea", {
     rows: 4,
@@ -55,27 +71,32 @@ export async function renderTaskDetail(container, route, ctx) {
     null,
     el("option", { value: "" }, "不使用 NAS 链接文件"),
     ...inputs.map((f) => {
-      const fn = typeof f === "string" ? f : f.filename || f.name;
-      return fn ? el("option", { value: fn, selected: fn === task.input_file }, fn) : null;
+      const fn = typeof f === "string" ? f : f.name || f.filename;
+      return fn
+        ? el("option", { value: fn, selected: fn === task.input_file }, `${fn}${f.url_count ? ` (${f.url_count} 条)` : ""}`)
+        : null;
     })
   );
+  const notesIn = el("input", { type: "text", value: task.notes || "", placeholder: "备注信息（可选）" });
 
   const optCtrl = createDownloadOptions({
     initial: {
       proxy_mode: task.proxy_mode,
       proxy_url: task.proxy_url,
+      subdir: task.subdir,
       skip_mode: task.skip_mode,
-      skip_value: task.skip_value,
-      sleep_request: task.sleep_request,
-      output_subdir: task.output_subdir,
-      filename: task.filename,
+      filename_format: task.filename_format,
       extra_args: task.extra_args,
-      archive_enabled: task.archive_enabled,
+      use_archive: task.use_archive,
       archive_backfill: task.archive_backfill,
       postprocess_mode: task.postprocess_mode,
+      postprocess_date_field: task.postprocess_date_field,
+      postprocess_command: task.postprocess_command,
     },
     overview: overviewRes,
-    getContextUrl: () => urlsIn.value,
+    taskId: task.id,
+    getContextUrls: () => urlsIn.value,
+    getInputFile: () => inputSel.value,
   });
 
   const refreshCron = debounce(async () => {
@@ -83,14 +104,17 @@ export async function renderTaskDetail(container, route, ctx) {
     if (!expr) return;
     try {
       const res = await api.post("/api/cron/preview", { cron_expr: expr });
-      const nextRuns = res?.next_runs || res?.times || [];
-      cronHint.textContent = nextRuns.length ? `未来触发：${nextRuns.slice(0, 3).map(fmtTimeShort).join(" 、")}` : "表达式有效";
+      const nextRuns = res?.next_runs || [];
+      cronHint.textContent = nextRuns.length
+        ? `${res.description || ""} · 未来触发：${nextRuns.slice(0, 3).join(" / ")}`
+        : res?.description || "表达式有效";
     } catch (err) {
       cronHint.textContent = `表达式无效：${err.message}`;
     }
   }, 250);
   cronIn.addEventListener("input", refreshCron);
   urlsIn.addEventListener("input", () => optCtrl.refreshPreview());
+  inputSel.addEventListener("change", () => optCtrl.refreshPreview());
 
   const saveBtn = el("button", { type: "submit", class: "fl-btn accent" }, "保存修改");
 
@@ -116,6 +140,7 @@ export async function renderTaskDetail(container, route, ctx) {
             enabled: enabledIn.checked,
             urls,
             input_file: inputSel.value || "",
+            notes: notesIn.value.trim(),
             ...optCtrl.getPayload(),
           });
           toast("任务配置已保存");
@@ -141,6 +166,7 @@ export async function renderTaskDetail(container, route, ctx) {
         "div",
         { class: "stack sm-gap" },
         el("div", { class: "field" }, el("label", null, "NAS /data/inputs/ 文件"), inputSel),
+        el("div", { class: "field" }, el("label", null, "备注"), notesIn),
         el("label", { class: "switch-inline" }, enabledIn, el("span", null, "启用此定时任务"))
       )
     ),
@@ -208,7 +234,24 @@ export async function renderTaskDetail(container, route, ctx) {
     )
   );
 
-  // Recent runs table
+  // Task health summary KPI strip (when stats exist)
+  const healthRow =
+    health.total > 0
+      ? el(
+          "div",
+          { class: "stats-grid" },
+          el("div", { class: "fl-stat-card" }, el("span", { class: "fl-stat-label" }, "历史运行次数"), el("strong", null, String(health.total))),
+          el(
+            "div",
+            { class: `fl-stat-card${health.success_rate >= 0.8 ? " ok" : health.success_rate !== null ? " warn" : ""}` },
+            el("span", { class: "fl-stat-label" }, "成功率"),
+            el("strong", null, health.success_rate !== null && health.success_rate !== undefined ? `${Math.round(health.success_rate * 100)}%` : "—")
+          ),
+          el("div", { class: "fl-stat-card ok" }, el("span", { class: "fl-stat-label" }, "累计下载"), el("strong", null, String(health.total_downloaded ?? 0))),
+          el("div", { class: "fl-stat-card" }, el("span", { class: "fl-stat-label" }, "平均耗时"), el("strong", null, fmtDuration(health.avg_duration_sec)))
+        )
+      : null;
+
   const historyCard = el(
     "section",
     { class: "fl-card stack sm-gap" },
@@ -226,7 +269,7 @@ export async function renderTaskDetail(container, route, ctx) {
         el(
           "thead",
           null,
-          el("tr", null, el("th", null, "ID"), el("th", null, "状态"), el("th", null, "新增/跳过"), el("th", null, "耗时"), el("th", null, "触发时间"), el("th", null, "操作"))
+          el("tr", null, el("th", null, "ID"), el("th", null, "状态"), el("th", null, "新增 / 跳过"), el("th", null, "耗时"), el("th", null, "触发时间"), el("th", null, "操作"))
         ),
         el(
           "tbody",
@@ -237,14 +280,10 @@ export async function renderTaskDetail(container, route, ctx) {
               null,
               el("td", null, el("a", { href: `#runs/${r.id}` }, `#${r.id}`)),
               el("td", null, statusBadge(r.status)),
-              el("td", null, `+${r.files_downloaded ?? 0} / ${r.files_skipped ?? 0}`),
-              el("td", null, fmtDuration(r.duration_seconds)),
+              el("td", null, `+${r.downloaded_count ?? 0} / ${r.skipped_count ?? 0}`),
+              el("td", null, fmtDuration(r.duration_sec)),
               el("td", null, fmtTimeShort(r.created_at)),
-              el(
-                "td",
-                null,
-                el("a", { class: "fl-btn subtle xs", href: `#runs/${r.id}` }, "日志")
-              )
+              el("td", null, el("a", { class: "fl-btn subtle xs", href: `#runs/${r.id}` }, "日志"))
             )
           )
         )
@@ -264,10 +303,12 @@ export async function renderTaskDetail(container, route, ctx) {
           "div",
           { class: "row-actions" },
           el("a", { class: "fl-btn subtle sm", href: "#tasks" }, "← 返回任务列表"),
-          el("h1", { class: "fl-page-title", style: { margin: 0, fontSize: "1.3rem" } }, task.name || `任务 #${task.id}`)
+          el("h1", { class: "fl-page-title", style: { margin: 0, fontSize: "1.3rem" } }, task.name || `任务 #${task.id}`),
+          ...matchedSites.map((s) => el("a", { class: "fl-badge info", href: `#site/${encodeURIComponent(s)}` }, SITE_LABELS[s] || s))
         ),
         el("span", { class: "muted xs" }, `Task ID #${task.id}`)
       ),
+      healthRow,
       form,
       historyCard
     )

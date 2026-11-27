@@ -1,17 +1,7 @@
 /**
  * Singleton SSE manager for /api/events.
+ * Backend emits unnamed SSE JSON frames: data: {"type": "...", ...}
  */
-const EVENT_NAMES = [
-  "hello",
-  "scheduler",
-  "config_changed",
-  "run_queued",
-  "run_started",
-  "run_finished",
-  "tasks_changed",
-  "alerts_changed",
-];
-
 class EventBus {
   constructor() {
     this.es = null;
@@ -25,20 +15,20 @@ class EventBus {
     const es = new EventSource("/api/events");
     this.es = es;
 
-    for (const type of EVENT_NAMES) {
-      es.addEventListener(type, (ev) => {
-        let payload = null;
-        if (ev.data) {
-          try {
-            payload = JSON.parse(ev.data);
-          } catch {
-            payload = ev.data;
-          }
-        }
+    es.onmessage = (ev) => {
+      if (!ev.data) return;
+      let payload = null;
+      try {
+        payload = JSON.parse(ev.data);
+      } catch {
+        return;
+      }
+      const type = payload && typeof payload === "object" ? payload.type : null;
+      if (type) {
         this.emit(type, payload);
         this.emit("*", { type, payload });
-      });
-    }
+      }
+    };
 
     es.onerror = () => {
       // Browser EventSource handles backoff automatically unless closed.

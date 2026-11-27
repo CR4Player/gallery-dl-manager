@@ -106,6 +106,7 @@ export const RUN_STATUS_META = {
   auth_error: { label: "认证失效", cls: "err" },
   failed: { label: "失败", cls: "err" },
   canceled: { label: "已中止", cls: "neutral" },
+  cancelled: { label: "已中止", cls: "neutral" },
 };
 
 export function statusBadge(status) {

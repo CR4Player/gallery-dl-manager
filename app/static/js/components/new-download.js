@@ -24,6 +24,9 @@ function updateDetectedSites(urlsText, statusBox) {
   for (const site of sites) {
     const h = siteHealthMap[site];
     const health = h?.health || "unknown";
+    const infoText =
+      h?.last_auth_error_summary ||
+      (h?.has_credentials ? `已配凭据 (${h.cookie_count || 0} Cookie)` : "尚未配置凭据");
     const row = el(
       "div",
       { class: "fl-infobar sm", style: { justifyContent: "space-between" } },
@@ -32,9 +35,10 @@ function updateDetectedSites(urlsText, statusBox) {
         { class: "row-actions sm-gap" },
         el("span", { class: `health-dot ${health}` }),
         el("strong", { class: "sm" }, SITE_LABELS[site] || site),
-        healthBadge(health, h?.message || undefined)
+        healthBadge(health),
+        el("span", { class: "muted xs" }, infoText)
       ),
-      health === "error" || health === "warn" || health === "unknown"
+      health === "error" || health === "warn" || health === "unknown" || !h?.has_credentials
         ? el(
             "button",
             {
@@ -87,23 +91,19 @@ async function populateDrawerData(prefill = {}) {
   ]);
 
   siteHealthMap = {};
-  const healthList = sitesHealthRes?.sites || sitesHealthRes?.items || [];
-  if (Array.isArray(healthList)) {
-    for (const s of healthList) {
-      if (s.site) siteHealthMap[s.site] = s;
-    }
-  } else if (sitesHealthRes && typeof sitesHealthRes === "object") {
-    siteHealthMap = sitesHealthRes;
+  const healthList = Array.isArray(sitesHealthRes?.sites) ? sitesHealthRes.sites : [];
+  for (const s of healthList) {
+    if (s && s.site) siteHealthMap[s.site] = s;
   }
 
   if (inputSel) {
     const prev = inputSel.value;
-    const files = inputsRes?.files || inputsRes?.items || (Array.isArray(inputsRes) ? inputsRes : []);
+    const files = Array.isArray(inputsRes?.files) ? inputsRes.files : [];
     inputSel.innerHTML = "";
     inputSel.appendChild(el("option", { value: "" }, "不使用 NAS 列表"));
     for (const f of files) {
-      const name = typeof f === "string" ? f : f.filename || f.name;
-      if (name) inputSel.appendChild(el("option", { value: name }, name));
+      const name = typeof f === "string" ? f : f.name || f.filename;
+      if (name) inputSel.appendChild(el("option", { value: name }, `${name}${f.url_count ? ` (${f.url_count} 条)` : ""}`));
     }
     if (prev) inputSel.value = prev;
   }
@@ -113,7 +113,9 @@ async function populateDrawerData(prefill = {}) {
     optionsCtrl = createDownloadOptions({
       initial: prefill.options || {},
       overview: overviewRes,
-      getContextUrl: () => urlsEl?.value || "",
+      getContextUrls: () => urlsEl?.value || "",
+      getInputFile: () => inputSel?.value || "",
+      getSimulate: () => Boolean(simEl?.checked),
     });
     optionsSlot.appendChild(optionsCtrl.el);
   }
@@ -135,6 +137,7 @@ function ensureBound() {
   const fileClearBtn = document.getElementById("nd-file-clear");
   const fileStatus = document.getElementById("nd-file-status");
   const inputSel = document.getElementById("nd-input-file");
+  const simEl = document.getElementById("nd-simulate");
   const submitBtn = document.getElementById("nd-submit-btn");
 
   const closeDrawer = () => dialog?.close?.();
@@ -145,6 +148,8 @@ function ensureBound() {
     if (statusBox) updateDetectedSites(urlsEl.value, statusBox);
     optionsCtrl?.refreshPreview();
   });
+  inputSel?.addEventListener("change", () => optionsCtrl?.refreshPreview());
+  simEl?.addEventListener("change", () => optionsCtrl?.refreshPreview());
 
   fileEl?.addEventListener("change", async () => {
     const file = fileEl.files?.[0];
@@ -155,17 +160,21 @@ function ensureBound() {
         .split(/\r?\n/)
         .map((l) => l.trim())
         .filter((l) => l && !l.startsWith("#"));
-      const upRes = await api.post("/api/inputs/upload", {
-        filename: file.name,
-        content,
-      }).catch(() => null);
+      const upRes = await api
+        .post("/api/inputs/upload", {
+          filename: file.name,
+          content,
+        })
+        .catch(() => null);
 
-      if (upRes?.filename && inputSel) {
-        uploadedInputFilename = upRes.filename;
-        if (![...inputSel.options].some((o) => o.value === uploadedInputFilename)) {
-          inputSel.appendChild(el("option", { value: uploadedInputFilename }, uploadedInputFilename));
+      const savedName = upRes?.file?.name || upRes?.filename || "";
+      if (savedName && inputSel) {
+        uploadedInputFilename = savedName;
+        if (![...inputSel.options].some((o) => o.value === savedName)) {
+          inputSel.appendChild(el("option", { value: savedName }, `${savedName} (${lines.length} 条)`));
         }
-        inputSel.value = uploadedInputFilename;
+        inputSel.value = savedName;
+        optionsCtrl?.refreshPreview();
       } else if (urlsEl && lines.length) {
         urlsEl.value = [urlsEl.value.trim(), ...lines].filter(Boolean).join("\n");
         if (statusBox) updateDetectedSites(urlsEl.value, statusBox);
@@ -186,6 +195,7 @@ function ensureBound() {
     if (fileEl) fileEl.value = "";
     if (uploadedInputFilename && inputSel && inputSel.value === uploadedInputFilename) {
       inputSel.value = "";
+      optionsCtrl?.refreshPreview();
     }
     uploadedInputFilename = "";
     fileClearBtn.classList.add("hidden");
@@ -209,8 +219,8 @@ function ensureBound() {
       return;
     }
 
-    const name = document.getElementById("nd-name")?.value.trim() || "";
-    const simulate = Boolean(document.getElementById("nd-simulate")?.checked);
+    const name = document.getElementById("nd-name")?.value.trim() || "临时下载";
+    const simulate = Boolean(simEl?.checked);
     const optPayload = optionsCtrl?.getPayload() || {};
 
     submitBtn.disabled = true;
@@ -218,8 +228,8 @@ function ensureBound() {
     try {
       const res = await api.post("/api/download", {
         urls,
-        input_file: inputFile || undefined,
-        name: name || undefined,
+        input_file: inputFile,
+        name,
         simulate,
         ...optPayload,
       });

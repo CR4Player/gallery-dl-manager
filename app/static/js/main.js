@@ -138,14 +138,21 @@ async function refreshHealthAndTasksBadge() {
 function resolveAlertAction(alert) {
   if (!alert) return null;
   if (alert.action?.route) return alert.action;
-  if (alert.site) {
+  const firstSite = alert.site || (Array.isArray(alert.sites) ? alert.sites[0] : "");
+  if (alert.status === "auth_error" && firstSite) {
     return {
-      label: alert.kind === "auth_error" ? "更新凭据" : "查看站点",
-      route: `#site/${encodeURIComponent(alert.site)}`,
+      label: `更新 ${SITE_LABELS[firstSite] || firstSite} 凭据`,
+      route: `#site/${encodeURIComponent(firstSite)}`,
     };
+  }
+  if (alert.target_view === "notifications") {
+    return { label: "检查通知配置", route: "#settings/notifications" };
   }
   if (alert.run_id) {
     return { label: "查看日志", route: `#runs/${alert.run_id}` };
+  }
+  if (firstSite) {
+    return { label: "查看站点", route: `#site/${encodeURIComponent(firstSite)}` };
   }
   if (alert.task_id) {
     return { label: "查看任务", route: `#task/${alert.task_id}` };
@@ -178,10 +185,26 @@ function renderAlertsUI() {
 
   for (const a of items) {
     const isUnread = !a.read_at && !a.read;
-    const severityCls = a.severity === "error" || a.level === "error" ? "err" : a.severity === "warn" || a.level === "warning" ? "warn" : "info";
-    const severityLabel = a.kind === "auth_error" ? "认证失效" : severityCls === "err" ? "异常" : severityCls === "warn" ? "警告" : "提示";
+    const st = a.status || a.severity || a.level || "";
+    const severityCls =
+      st === "auth_error" || st === "failed" || st === "error"
+        ? "err"
+        : st === "partial" || st === "warn" || st === "warning"
+          ? "warn"
+          : "info";
+    const severityLabel =
+      st === "auth_error"
+        ? "认证失效"
+        : st === "partial"
+          ? "部分失败"
+          : severityCls === "err"
+            ? "异常"
+            : severityCls === "warn"
+              ? "警告"
+              : "提示";
     const act = resolveAlertAction(a);
-    const siteLabel = a.site ? SITE_LABELS[a.site] || a.site : "";
+    const siteName = a.site || (Array.isArray(a.sites) ? a.sites[0] : "");
+    const siteLabel = siteName ? SITE_LABELS[siteName] || siteName : "";
 
     const row = el(
       "div",
@@ -234,7 +257,7 @@ async function refreshAlerts() {
   try {
     const res = await api.get("/api/alerts");
     alertsState = {
-      items: res?.alerts || res?.items || [],
+      items: res?.items || res?.alerts || [],
       unread_count: res?.unread_count ?? 0,
     };
     renderAlertsUI();

@@ -1,31 +1,53 @@
 import { api } from "../api.js";
-import { el, debounce, copyText, detectSiteFromUrl } from "../util.js";
-import { createOverrideField } from "./override-field.js";
+import { el, debounce, copyText } from "../util.js";
+
+const SOURCE_LABELS = {
+  global: "全局设置",
+  task: "任务覆盖",
+  direct: "直连",
+  default: "默认",
+};
+
+function formatSource(src) {
+  if (!src) return "默认";
+  if (SOURCE_LABELS[src]) return SOURCE_LABELS[src];
+  if (src.startsWith("site:")) return `站点 ${src.slice(5)}`;
+  return src;
+}
 
 /**
  * Shared download/task options panel + live effective config preview.
- * Keeps SQLite Archive deduplication and ExifTool postprocessing clearly separated.
+ * Strictly aligned with app/api.py & app/insights.py (`compute_effective_config`).
  */
 export function createDownloadOptions({
   initial = {},
   overview = null,
-  getContextUrl = () => "",
+  taskId = null,
+  getContextUrls = () => "",
+  getInputFile = () => "",
+  getSimulate = () => false,
   onChange = () => {},
 } = {}) {
-  const globalCfg = overview?.global_config || overview?.settings || {};
+  const settings = overview?.settings || {};
+  const globalProxy = settings.global_proxy || "";
+  const defaultSkip = overview?.default_skip || "abort:7";
+
+  const PRESET_SKIPS = new Set(["", "abort:5", "abort:7", "abort:10", "true", "false"]);
+  const initSkip = String(initial.skip_mode || "");
+  const isCustomInitSkip = initSkip && !PRESET_SKIPS.has(initSkip);
 
   const state = {
     proxy_mode: initial.proxy_mode || "inherit",
     proxy_url: initial.proxy_url || "",
-    skip_mode: initial.skip_mode || "inherit",
-    skip_value: initial.skip_value || "",
-    sleep_request: initial.sleep_request ?? null,
-    output_subdir: initial.output_subdir || "",
-    filename: initial.filename || "",
+    skip_mode: initSkip,
+    subdir: initial.subdir || "",
+    filename_format: initial.filename_format || "",
     extra_args: initial.extra_args || "",
-    archive_enabled: initial.archive_enabled ?? null,
+    use_archive: Boolean(initial.use_archive),
     archive_backfill: Boolean(initial.archive_backfill),
     postprocess_mode: initial.postprocess_mode || "inherit",
+    postprocess_date_field: initial.postprocess_date_field || "",
+    postprocess_command: initial.postprocess_command || "",
   };
 
   const root = el("div", { class: "stack" });
@@ -40,10 +62,9 @@ export function createDownloadOptions({
         emitChange();
       },
     },
-    el("option", { value: "inherit", selected: state.proxy_mode === "inherit" }, "继承默认（全局/站点）"),
-    el("option", { value: "global", selected: state.proxy_mode === "global" }, "强制使用全局代理"),
+    el("option", { value: "inherit", selected: state.proxy_mode === "inherit" }, globalProxy ? `跟随全局 (${globalProxy})` : "跟随全局（当前直连）"),
     el("option", { value: "direct", selected: state.proxy_mode === "direct" }, "强制直连（绕过代理）"),
-    el("option", { value: "custom", selected: state.proxy_mode === "custom" }, "自定义代理地址")
+    el("option", { value: "custom", selected: state.proxy_mode === "custom" }, "自定义代理 URL")
   );
   const proxyUrlInput = el("input", {
     type: "text",
@@ -66,63 +87,57 @@ export function createDownloadOptions({
     "select",
     {
       onChange: (e) => {
-        state.skip_mode = e.target.value;
-        skipValField.classList.toggle("hidden", state.skip_mode !== "enable");
+        const val = e.target.value;
+        if (val === "__custom__") {
+          skipCustomField.classList.remove("hidden");
+          state.skip_mode = skipCustomInput.value.trim();
+        } else {
+          skipCustomField.classList.add("hidden");
+          state.skip_mode = val;
+        }
         emitChange();
       },
     },
-    el("option", { value: "inherit", selected: state.skip_mode === "inherit" }, `继承默认 (${globalCfg.skip || "abort:7"})`),
-    el("option", { value: "enable", selected: state.skip_mode === "enable" }, "自定义 Skip 阈值"),
-    el("option", { value: "disable", selected: state.skip_mode === "disable" }, "禁用跳过限制（全量扫描）")
+    el("option", { value: "", selected: state.skip_mode === "" }, `继承默认 (${defaultSkip})`),
+    el("option", { value: "abort:5", selected: state.skip_mode === "abort:5" }, "连续 5 个已存在即中止 (abort:5)"),
+    el("option", { value: "abort:7", selected: state.skip_mode === "abort:7" }, "连续 7 个已存在即中止 (abort:7)"),
+    el("option", { value: "abort:10", selected: state.skip_mode === "abort:10" }, "连续 10 个已存在即中止 (abort:10)"),
+    el("option", { value: "true", selected: state.skip_mode === "true" }, "遇到已存在跳过但不中止 (true)"),
+    el("option", { value: "false", selected: state.skip_mode === "false" }, "全量覆盖检查 (false)"),
+    el("option", { value: "__custom__", selected: isCustomInitSkip }, "自定义 Skip 规则…")
   );
-  const skipValInput = el("input", {
+  const skipCustomInput = el("input", {
     type: "text",
-    value: state.skip_value,
-    placeholder: "例如 abort:10 或 enumerate",
+    value: isCustomInitSkip ? state.skip_mode : "",
+    placeholder: "例如 abort:20 或 enumerate",
     onInput: (e) => {
-      state.skip_value = e.target.value;
+      state.skip_mode = e.target.value.trim();
       emitChange();
     },
   });
-  const skipValField = el(
+  const skipCustomField = el(
     "div",
-    { class: `field${state.skip_mode === "enable" ? "" : " hidden"}` },
-    el("label", null, "Skip 规则值"),
-    skipValInput
+    { class: `field${isCustomInitSkip ? "" : " hidden"}` },
+    el("label", null, "自定义 Skip 值"),
+    skipCustomInput
   );
 
-  // Sleep override
-  const sleepField = createOverrideField({
-    label: "请求间隔 (sleep-request 秒)",
-    value: state.sleep_request,
-    type: "number",
-    min: 0,
-    step: "0.5",
-    defaultCustomValue: 1.5,
-    inheritedSource: "全局/站点默认",
-    inheritedText: globalCfg["sleep-request"] ? `${globalCfg["sleep-request"]} s` : "由站点规则决定",
-    onChange: (val) => {
-      state.sleep_request = val;
-      emitChange();
-    },
-  });
-
-  // Output subdir & filename
+  // Subdir, Filename, Extra args
   const subdirInput = el("input", {
     type: "text",
-    value: state.output_subdir,
-    placeholder: "例如 twitter-likes（相对于下载根目录）",
+    value: state.subdir,
+    placeholder: "例如 twitter-likes（相对于 /gallery-dl）",
     onInput: (e) => {
-      state.output_subdir = e.target.value;
+      state.subdir = e.target.value;
       emitChange();
     },
   });
   const filenameInput = el("input", {
     type: "text",
-    value: state.filename,
-    placeholder: "留空沿用站点/全局文件名模板",
+    value: state.filename_format,
+    placeholder: "留空沿用站点或全局模板",
     onInput: (e) => {
-      state.filename = e.target.value;
+      state.filename_format = e.target.value;
       emitChange();
     },
   });
@@ -136,27 +151,30 @@ export function createDownloadOptions({
     },
   });
 
-  // Card 1: SQLite Archive 去重 (strictly separated from ExifTool!)
-  const archiveSelect = el(
-    "select",
-    {
-      onChange: (e) => {
-        const v = e.target.value;
-        state.archive_enabled = v === "inherit" ? null : v === "true";
-        emitChange();
-      },
-    },
-    el("option", { value: "inherit", selected: state.archive_enabled === null }, "继承全局设置"),
-    el("option", { value: "true", selected: state.archive_enabled === true }, "启用 SQLite Archive 去重"),
-    el("option", { value: "false", selected: state.archive_enabled === false }, "禁用 Archive（允许重复下载）")
-  );
-  const archiveBackfillToggle = el("input", {
+  // Card 1: SQLite Archive 去重 (strictly separated)
+  const backfillToggle = el("input", {
     type: "checkbox",
     role: "switch",
     switch: true,
     checked: state.archive_backfill,
+    disabled: !state.use_archive,
     onChange: (e) => {
       state.archive_backfill = e.target.checked;
+      emitChange();
+    },
+  });
+  const archiveToggle = el("input", {
+    type: "checkbox",
+    role: "switch",
+    switch: true,
+    checked: state.use_archive,
+    onChange: (e) => {
+      state.use_archive = e.target.checked;
+      backfillToggle.disabled = !state.use_archive;
+      if (!state.use_archive) {
+        state.archive_backfill = false;
+        backfillToggle.checked = false;
+      }
       emitChange();
     },
   });
@@ -167,37 +185,69 @@ export function createDownloadOptions({
       "div",
       { class: "label-row" },
       el("span", { class: "fl-subcard-title" }, "SQLite Archive 去重"),
-      el("span", { class: "fl-badge neutral" }, "防重复抓取")
+      el("span", { class: "fl-badge neutral" }, "/data/archive.sqlite3")
     ),
     el(
       "div",
       { class: "form-grid-2" },
-      el("div", { class: "field" }, el("label", null, "去重策略"), archiveSelect),
       el(
-        "div",
-        { class: "field", style: { justifyContent: "flex-end" } },
-        el(
-          "label",
-          { class: "switch-inline" },
-          archiveBackfillToggle,
-          el("span", null, "跳过已存在文件时回填记录")
-        )
+        "label",
+        { class: "switch-inline" },
+        archiveToggle,
+        el("span", null, "启用 Archive 记录去重")
+      ),
+      el(
+        "label",
+        { class: "switch-inline" },
+        backfillToggle,
+        el("span", null, "跳过已存在时自动回填 (skip)")
       )
     )
   );
 
-  // Card 2: ExifTool 后处理 (strictly separated!)
+  // Card 2: ExifTool 后处理 (strictly separated)
+  const postDateField = el(
+    "div",
+    { class: `field${state.postprocess_mode === "enabled" ? "" : " hidden"}` },
+    el("label", null, "日期元数据模板 (留空默认 {date:%Y-%m-%dT%H:%M:%S})"),
+    el("input", {
+      type: "text",
+      value: state.postprocess_date_field,
+      placeholder: "{date:%Y-%m-%dT%H:%M:%S}",
+      onInput: (e) => {
+        state.postprocess_date_field = e.target.value;
+        emitChange();
+      },
+    })
+  );
+  const postCustomField = el(
+    "div",
+    { class: `field${state.postprocess_mode === "custom" ? "" : " hidden"}` },
+    el("label", null, "自定义 exec 后处理指令"),
+    el("input", {
+      type: "text",
+      value: state.postprocess_command,
+      placeholder: "python3 /path/to/script.py {_path}",
+      onInput: (e) => {
+        state.postprocess_command = e.target.value;
+        emitChange();
+      },
+    })
+  );
   const postSelect = el(
     "select",
     {
       onChange: (e) => {
         state.postprocess_mode = e.target.value;
+        postDateField.classList.toggle("hidden", state.postprocess_mode !== "enabled");
+        postCustomField.classList.toggle("hidden", state.postprocess_mode !== "custom");
         emitChange();
       },
     },
-    el("option", { value: "inherit", selected: state.postprocess_mode === "inherit" }, "继承站点默认后处理规则"),
-    el("option", { value: "enable", selected: state.postprocess_mode === "enable" }, "强制启用 ExifTool 元数据写入"),
-    el("option", { value: "disable", selected: state.postprocess_mode === "disable" }, "禁用后处理（保留原始文件）")
+    el("option", { value: "inherit", selected: state.postprocess_mode === "inherit" }, "按站点配置分别执行 (inherit)"),
+    el("option", { value: "enabled", selected: state.postprocess_mode === "enabled" }, "强制启用内置 ExifTool 时间与元数据写入"),
+    el("option", { value: "custom", selected: state.postprocess_mode === "custom" }, "自定义 exec 后处理指令"),
+    el("option", { value: "disabled", selected: state.postprocess_mode === "disabled" }, "强制禁用后处理")
   );
   const postCard = el(
     "div",
@@ -206,14 +256,15 @@ export function createDownloadOptions({
       "div",
       { class: "label-row" },
       el("span", { class: "fl-subcard-title" }, "ExifTool 后处理"),
-      el("span", { class: "fl-badge neutral" }, "元数据与标签")
+      el("span", { class: "fl-badge neutral" }, "元数据与拍摄时间")
     ),
     el("div", { class: "field" }, el("label", null, "后处理模式"), postSelect),
-    el("div", { class: "muted xs" }, "开启后将在下载完成后自动写入来源 URL、作者、标签与拍摄时间等 EXIF/XMP 元数据。")
+    postDateField,
+    postCustomField
   );
 
   // Effective Config Live Preview
-  const cmdCode = el("pre", { class: "cmd-preview" }, "gallery-dl --config /tmp/effective.json <待输入 URL>");
+  const cmdCode = el("pre", { class: "cmd-preview" }, "gallery-dl -c /data/.runtime-conf.json <URL>");
   const effGrid = el("div", { class: "eff-grid" });
   const previewBox = el(
     "div",
@@ -246,69 +297,62 @@ export function createDownloadOptions({
         el("span", { class: "muted xs" }, title),
         el("span", { class: "fl-badge neutral" }, source)
       ),
-      el("code", { title: String(value) }, String(value || "—"))
+      el("code", { title: String(value || "") }, String(value || "—"))
     );
   }
 
-  function renderLocalFallbackPreview() {
-    const rawUrl = (getContextUrl() || "").split(/\r?\n/).find((l) => l.trim()) || "";
-    const site = detectSiteFromUrl(rawUrl);
-    const outDir = state.output_subdir ? `/gallery-dl/${state.output_subdir}` : "/gallery-dl";
+  function renderLocalFallback() {
+    const outDir = state.subdir.trim() ? `/gallery-dl/${state.subdir.trim()}` : "/gallery-dl";
     const proxyVal =
       state.proxy_mode === "direct"
-        ? "直连 (none)"
+        ? "直连 (无代理)"
         : state.proxy_mode === "custom"
           ? state.proxy_url || "<未填写>"
-          : globalCfg.proxy || "未配置";
-    const proxySrc = state.proxy_mode === "inherit" ? "默认" : "任务覆盖";
-    const skipVal =
-      state.skip_mode === "disable"
-        ? "已禁用"
-        : state.skip_mode === "enable"
-          ? state.skip_value || "自定义"
-          : globalCfg.skip || "abort:7";
-    const skipSrc = state.skip_mode === "inherit" ? "全局设置" : "任务覆盖";
-    const archVal =
-      state.archive_enabled === true ? "已启用" : state.archive_enabled === false ? "已禁用" : "继承全局";
-
-    cmdCode.textContent = `gallery-dl --config /tmp/effective.json${state.extra_args ? " " + state.extra_args : ""} ${rawUrl || (site ? `<${site}>` : "<待输入 URL>")}`;
-    effGrid.innerHTML = "";
-    effGrid.append(
-      renderEffCard("输出目录", state.output_subdir ? "子目录" : "默认", outDir),
-      renderEffCard("代理", proxySrc, proxyVal),
-      renderEffCard("Skip", skipSrc, skipVal),
-      renderEffCard("Archive / 后处理", state.postprocess_mode === "inherit" ? "站点默认" : "覆盖", archVal)
+          : globalProxy || "直连 (未配全局代理)";
+    effGrid.replaceChildren(
+      renderEffCard("输出目录", state.subdir.trim() ? "任务覆盖" : "默认", outDir),
+      renderEffCard("代理", state.proxy_mode === "direct" ? "直连" : state.proxy_mode === "custom" ? "任务覆盖" : globalProxy ? "全局设置" : "直连", proxyVal),
+      renderEffCard("Skip", state.skip_mode ? "任务覆盖" : "全局/默认", state.skip_mode || defaultSkip),
+      renderEffCard("Archive", state.use_archive ? (state.archive_backfill ? "启用+回填" : "已启用") : "未启用", state.use_archive ? "/data/archive.sqlite3" : "未启用")
     );
   }
 
   const fetchEffective = debounce(async () => {
-    const rawUrl = (getContextUrl() || "").split(/\r?\n/).find((l) => l.trim()) || "";
+    const rawUrls = String(getContextUrls() || "")
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .filter((l) => l && !l.startsWith("#"));
     try {
       const res = await api.post("/api/config/effective", {
-        url: rawUrl,
-        overrides: { ...state },
+        ...(taskId ? { task_id: Number(taskId) } : {}),
+        urls: rawUrls,
+        input_file: getInputFile() || "",
+        simulate: Boolean(getSimulate()),
+        ...getPayload(),
       });
-      if (!res) {
-        renderLocalFallbackPreview();
+      if (!res || !res.fields) {
+        renderLocalFallback();
         return;
       }
-      cmdCode.textContent = res.command_preview || res.command || cmdCode.textContent;
-      const items = res.summary || res.fields;
-      effGrid.innerHTML = "";
-      if (Array.isArray(items) && items.length) {
-        for (const it of items) {
-          effGrid.appendChild(renderEffCard(it.label || it.key, it.source || "生效", it.value));
-        }
-      } else {
-        effGrid.append(
-          renderEffCard("输出目录", res.output_source || "默认", res.base_directory || state.output_subdir || "/gallery-dl"),
-          renderEffCard("代理", res.proxy_source || "继承", res.proxy ?? "直连"),
-          renderEffCard("Skip", res.skip_source || "继承", res.skip ?? "abort:7"),
-          renderEffCard("Archive", res.archive_source || "继承", res.archive ? "启用" : "未启用")
-        );
-      }
+      cmdCode.textContent = res.command || cmdCode.textContent;
+      const f = res.fields;
+      const ppList = Array.isArray(f.postprocess) ? f.postprocess : [];
+      const ppText = ppList.length
+        ? ppList.map((p) => `${p.site === "*" ? "全部" : p.site}(${p.mode})`).join(", ")
+        : "未启用";
+
+      effGrid.replaceChildren(
+        renderEffCard("输出目录", formatSource(f.subdir?.source), res.base_directory || f.subdir?.value || "/gallery-dl"),
+        renderEffCard("代理", formatSource(f.proxy?.source), f.proxy?.value || "直连"),
+        renderEffCard("Skip", formatSource(f.skip?.source), String(f.skip?.value ?? defaultSkip)),
+        renderEffCard(
+          "Archive / 后处理",
+          f.archive?.value ? (f.archive?.backfill ? "回填" : "去重") : "未启用",
+          `${f.archive?.value ? "Archive 开" : "Archive 关"} · ${ppText}`
+        )
+      );
     } catch {
-      renderLocalFallbackPreview();
+      renderLocalFallback();
     }
   }, 220);
 
@@ -322,14 +366,14 @@ export function createDownloadOptions({
       proxy_mode: state.proxy_mode,
       proxy_url: state.proxy_mode === "custom" ? state.proxy_url.trim() : "",
       skip_mode: state.skip_mode,
-      skip_value: state.skip_mode === "enable" ? state.skip_value.trim() : "",
-      sleep_request: state.sleep_request === "" ? null : state.sleep_request,
-      output_subdir: state.output_subdir.trim(),
-      filename: state.filename.trim(),
+      subdir: state.subdir.trim(),
+      filename_format: state.filename_format.trim(),
       extra_args: state.extra_args.trim(),
-      archive_enabled: state.archive_enabled,
-      archive_backfill: Boolean(state.archive_backfill),
+      use_archive: Boolean(state.use_archive),
+      archive_backfill: Boolean(state.use_archive && state.archive_backfill),
       postprocess_mode: state.postprocess_mode,
+      postprocess_date_field: state.postprocess_mode === "enabled" ? state.postprocess_date_field.trim() : "",
+      postprocess_command: state.postprocess_mode === "custom" ? state.postprocess_command.trim() : "",
     };
   }
 
@@ -338,28 +382,23 @@ export function createDownloadOptions({
       "div",
       { class: "form-grid-2" },
       el("div", { class: "field" }, el("label", null, "代理策略"), proxySelect),
-      el("div", { class: "field" }, el("label", null, "Skip 策略"), skipSelect)
+      el("div", { class: "field" }, el("label", null, "Skip 增量中止策略"), skipSelect)
     ),
     proxyUrlField,
-    skipValField,
+    skipCustomField,
     el(
       "div",
       { class: "form-grid-2" },
       el("div", { class: "field" }, el("label", null, "输出子目录"), subdirInput),
       el("div", { class: "field" }, el("label", null, "文件名模板覆盖"), filenameInput)
     ),
-    el(
-      "div",
-      { class: "form-grid-2" },
-      sleepField.el,
-      el("div", { class: "field" }, el("label", null, "额外 CLI 参数"), extraArgsInput)
-    ),
+    el("div", { class: "field" }, el("label", null, "额外 CLI 参数"), extraArgsInput),
     archiveCard,
     postCard,
     previewBox
   );
 
-  renderLocalFallbackPreview();
+  renderLocalFallback();
   fetchEffective();
 
   return {

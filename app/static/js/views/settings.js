@@ -1,6 +1,5 @@
 import { api } from "../api.js";
 import { el, toast, confirmModal, fmtTimeShort, fmtBytes, copyText } from "../util.js";
-import { navigate } from "../router.js";
 
 const TABS = [
   { id: "general", label: "全局与代理" },
@@ -48,7 +47,7 @@ export async function renderSettings(container, route, ctx) {
   if (activeTab === "general") {
     await renderGeneralTab(bodyEl, ctx);
   } else if (activeTab === "auth") {
-    await renderAuthTab(bodyEl, ctx);
+    await renderAuthTab(bodyEl);
   } else if (activeTab === "notifications") {
     await renderNotificationsTab(bodyEl);
   } else if (activeTab === "cookies") {
@@ -60,16 +59,49 @@ export async function renderSettings(container, route, ctx) {
 
 async function renderGeneralTab(root, ctx) {
   const overview = await api.get("/api/config/overview");
-  const cfg = overview?.global_config || overview?.settings || {};
+  const settings = overview?.settings || {};
+  const downloader = overview?.downloader || {};
 
-  const baseDirIn = el("input", { type: "text", value: cfg["base-directory"] || "/gallery-dl" });
-  const proxyIn = el("input", { type: "text", value: cfg.proxy || "", placeholder: "http://host.docker.internal:7890" });
-  const skipIn = el("input", { type: "text", value: cfg.skip || "abort:7", placeholder: "abort:7" });
-  const sleepIn = el("input", { type: "number", step: "0.5", min: "0", value: cfg["sleep-request"] ?? 1 });
-  const retriesIn = el("input", { type: "number", min: "0", value: cfg.retries ?? 4 });
-  const timeoutIn = el("input", { type: "number", min: "1", value: cfg.timeout ?? 30 });
-  const filenameIn = el("input", { type: "text", value: cfg.filename || "" });
-  const archiveIn = el("input", { type: "text", value: cfg.archive || "/data/archive.sqlite3" });
+  const proxyIn = el("input", {
+    type: "text",
+    value: settings.global_proxy || "",
+    placeholder: "http://host.docker.internal:7890",
+  });
+  const skipIn = el("input", {
+    type: "text",
+    value: overview?.default_skip || "abort:7",
+    placeholder: "abort:7",
+  });
+  const concIn = el("input", {
+    type: "number",
+    min: "1",
+    max: "3",
+    value: settings.max_concurrency ?? 1,
+  });
+  const retDaysIn = el("input", {
+    type: "number",
+    min: "1",
+    max: "365",
+    value: settings.log_retention_days ?? 30,
+  });
+  const retriesIn = el("input", {
+    type: "number",
+    min: "0",
+    max: "20",
+    value: downloader.retries ?? 4,
+  });
+  const timeoutIn = el("input", {
+    type: "number",
+    min: "5",
+    max: "300",
+    step: "1",
+    value: downloader.timeout ?? 30,
+  });
+  const ppSitesIn = el("input", {
+    type: "text",
+    value: Array.isArray(settings.postprocess_default_sites) ? settings.postprocess_default_sites.join(", ") : "twitter",
+    placeholder: "例如 twitter, bluesky",
+  });
 
   const proxyStatus = el("div", { class: "muted xs hidden" });
 
@@ -80,19 +112,15 @@ async function renderGeneralTab(root, ctx) {
       class: "fl-btn sm",
       onClick: async () => {
         const p = proxyIn.value.trim();
-        if (!p) {
-          toast("请先填写代理地址", "danger");
-          return;
-        }
         testProxyBtn.disabled = true;
         proxyStatus.classList.remove("hidden");
-        proxyStatus.textContent = "正在测试代理连通性…";
+        proxyStatus.textContent = "正在测试连通性…";
         try {
           const res = await api.post("/api/config/proxy-test", { proxy_url: p });
-          proxyStatus.textContent = res?.ok === false
-            ? `连接失败：${res.error || res.message}`
-            : `连接正常（延迟 ${res?.latency_ms ?? "?"} ms${res?.ip ? ` · 出口 ${res.ip}` : ""}）`;
-          toast("代理连通性测试完成");
+          proxyStatus.textContent = res?.ok
+            ? `连接成功（HTTP ${res.status}）${res.detail ? ` · ${res.detail}` : ""}`
+            : `连接失败：${res?.detail || "不可达"}`;
+          toast(res?.ok ? "代理连通性正常" : "代理连通性测试失败", res?.ok ? "info" : "danger");
         } catch (err) {
           proxyStatus.textContent = `测试失败：${err.message}`;
           toast(`代理测试失败：${err.message}`, "danger");
@@ -103,8 +131,6 @@ async function renderGeneralTab(root, ctx) {
     },
     "测试代理连通性"
   );
-
-  const postPreviewOut = el("pre", { class: "cmd-preview hidden" });
 
   const saveBtn = el("button", { type: "submit", class: "fl-btn accent" }, "保存全局配置");
 
@@ -117,17 +143,20 @@ async function renderGeneralTab(root, ctx) {
           e.preventDefault();
           saveBtn.disabled = true;
           try {
+            const ppSites = ppSitesIn.value
+              .split(/[,，\s]+/)
+              .map((s) => s.trim())
+              .filter(Boolean);
             await api.put("/api/config/settings", {
-              "base-directory": baseDirIn.value.trim() || "/gallery-dl",
-              proxy: proxyIn.value.trim() || null,
-              skip: skipIn.value.trim() || "abort:7",
-              "sleep-request": Number(sleepIn.value || 0),
-              retries: Number(retriesIn.value || 0),
+              global_proxy: proxyIn.value.trim(),
+              default_skip: skipIn.value.trim(),
+              max_concurrency: Number(concIn.value || 1),
+              log_retention_days: Number(retDaysIn.value || 30),
+              retries: Number(retriesIn.value || 4),
               timeout: Number(timeoutIn.value || 30),
-              filename: filenameIn.value.trim() || undefined,
-              archive: archiveIn.value.trim() || undefined,
+              postprocess_default_sites: ppSites,
             });
-            toast("已保存全局配置");
+            toast("已保存全局设置并生成配置快照");
             await ctx?.refreshHeader?.();
           } catch (err) {
             toast(`保存失败：${err.message}`, "danger");
@@ -139,44 +168,26 @@ async function renderGeneralTab(root, ctx) {
       el("h2", { class: "fl-card-title", style: { margin: 0 } }, "全局下载策略与网络代理"),
       el(
         "div",
-        { class: "form-grid-2" },
-        el("div", { class: "field" }, el("label", null, "默认媒体输出根目录"), baseDirIn),
-        el("div", { class: "field" }, el("label", null, "全局 SQLite Archive 库路径"), archiveIn)
-      ),
-      el(
-        "div",
         { class: "field" },
-        el("label", null, "全局代理 URL (HTTP / SOCKS5)"),
+        el("label", null, "全局代理 URL (HTTP / HTTPS)"),
         el("div", { class: "input-with-btn" }, proxyIn, testProxyBtn),
         proxyStatus
       ),
       el(
         "div",
         { class: "form-grid-3" },
-        el("div", { class: "field" }, el("label", null, "全局 Skip 策略"), skipIn),
-        el("div", { class: "field" }, el("label", null, "默认请求间隔 (秒)"), sleepIn),
-        el("div", { class: "field" }, el("label", null, "网络重试 / 超时 (秒)"), el("div", { class: "row-actions" }, retriesIn, timeoutIn))
+        el("div", { class: "field" }, el("label", null, "默认 Skip 策略"), skipIn),
+        el("div", { class: "field" }, el("label", null, "最大并发下载数 (1-3)"), concIn),
+        el("div", { class: "field" }, el("label", null, "运行日志保留天数"), retDaysIn)
       ),
-      el("div", { class: "field" }, el("label", null, "全局默认文件名模板 (留空使用各站点默认)"), filenameIn),
       el(
         "div",
-        { class: "row-actions between" },
-        el(
-          "button",
-          {
-            type: "button",
-            class: "fl-btn sm",
-            onClick: async () => {
-              const res = await api.post("/api/config/postprocess-preview", {}).catch((e) => ({ error: e.message }));
-              postPreviewOut.classList.remove("hidden");
-              postPreviewOut.textContent = JSON.stringify(res, null, 2);
-            },
-          },
-          "预览默认 ExifTool 后处理规则"
-        ),
-        saveBtn
+        { class: "form-grid-3" },
+        el("div", { class: "field" }, el("label", null, "网络重试次数 (retries)"), retriesIn),
+        el("div", { class: "field" }, el("label", null, "请求超时秒数 (timeout)"), timeoutIn),
+        el("div", { class: "field" }, el("label", null, "默认开启 ExifTool 站点"), ppSitesIn)
       ),
-      postPreviewOut
+      el("div", { class: "row-actions", style: { justifyContent: "flex-end" } }, saveBtn)
     )
   );
 }
@@ -189,8 +200,7 @@ async function renderAuthTab(root) {
         "div",
         { class: "fl-card stack" },
         el("h2", { class: "fl-card-title", style: { margin: 0 } }, "Web 登录认证状态"),
-        el("div", { class: "fl-infobar warn" }, "当前容器通过环境变量禁用了登录认证（AUTH_DISABLED=1）。若控制台暴露在局域网/公网中，请务必关闭该选项。"),
-        el("div", { class: "muted xs" }, "已启用状态可在容器内查看 /setup 初始化与口令校验策略。")
+        el("div", { class: "fl-infobar warn" }, "当前容器通过环境变量禁用了登录认证（AUTH_DISABLED=1）。若控制台暴露在局域网/公网中，请务必关闭该选项。")
       )
     );
     return;
@@ -268,21 +278,51 @@ async function renderAuthTab(root) {
 
 async function renderNotificationsTab(root) {
   const data = await api.get("/api/notifications");
-  const cfg = data?.config || data || {};
-  const channels = cfg.channels || {};
-  const logs = data?.logs || data?.recent_logs || [];
+  // Backend schema puts telegram/feishu/bark/webhook as TOP-LEVEL keys inside data.config
+  const cfg = data?.config || {};
+  const logs = Array.isArray(data?.logs) ? data.logs : [];
 
-  const globalEnabled = el("input", { type: "checkbox", role: "switch", switch: true, checked: cfg.enabled !== false });
-  const cooldownIn = el("input", { type: "number", min: 0, value: cfg.cooldown_minutes ?? 30 });
+  const notifyOnSet = new Set(Array.isArray(cfg.notify_on) ? cfg.notify_on : ["failed", "auth_error", "partial"]);
+  const globalEnabled = el("input", { type: "checkbox", role: "switch", switch: true, checked: Boolean(cfg.enabled) });
+  const cooldownIn = el("input", { type: "number", min: 0, value: cfg.cooldown_minutes ?? 60 });
   const recoverySwitch = el("input", { type: "checkbox", role: "switch", switch: true, checked: Boolean(cfg.notify_on_recovery) });
-  const proxySwitch = el("input", { type: "checkbox", role: "switch", switch: true, checked: cfg.use_proxy !== false });
+  const proxySwitch = el("input", { type: "checkbox", role: "switch", switch: true, checked: Boolean(cfg.use_proxy) });
 
   const chState = {
-    telegram: { enabled: Boolean(channels.telegram?.enabled), bot_token: channels.telegram?.bot_token || "", chat_id: channels.telegram?.chat_id || "", thread_id: channels.telegram?.thread_id || "" },
-    feishu: { enabled: Boolean(channels.feishu?.enabled), webhook_url: channels.feishu?.webhook_url || "", secret: channels.feishu?.secret || "" },
-    bark: { enabled: Boolean(channels.bark?.enabled), server_url: channels.bark?.server_url || "https://api.day.app", device_key: channels.bark?.device_key || "", group: channels.bark?.group || "gallery-dl" },
-    webhook: { enabled: Boolean(channels.webhook?.enabled), url: channels.webhook?.url || "", secret: channels.webhook?.secret || "" },
+    telegram: {
+      enabled: Boolean(cfg.telegram?.enabled),
+      bot_token: cfg.telegram?.bot_token || "",
+      chat_id: cfg.telegram?.chat_id || "",
+      api_base: cfg.telegram?.api_base || "https://api.telegram.org",
+    },
+    feishu: {
+      enabled: Boolean(cfg.feishu?.enabled),
+      webhook_url: cfg.feishu?.webhook_url || "",
+      secret: cfg.feishu?.secret || "",
+    },
+    bark: {
+      enabled: Boolean(cfg.bark?.enabled),
+      server_url: cfg.bark?.server_url || "https://api.day.app",
+      device_key: cfg.bark?.device_key || "",
+      group: cfg.bark?.group || "gallery-dl",
+    },
+    webhook: {
+      enabled: Boolean(cfg.webhook?.enabled),
+      url: cfg.webhook?.url || "",
+      headers_json: cfg.webhook?.headers_json || "{}",
+    },
   };
+
+  function collectFullConfig() {
+    return {
+      enabled: globalEnabled.checked,
+      notify_on: [...notifyOnSet],
+      notify_on_recovery: recoverySwitch.checked,
+      cooldown_minutes: Number(cooldownIn.value || 0),
+      use_proxy: proxySwitch.checked,
+      ...chState,
+    };
+  }
 
   function makeChannelCard(key, title, fieldsSpec) {
     const c = chState[key];
@@ -301,8 +341,13 @@ async function renderNotificationsTab(root) {
         onClick: async () => {
           testBtn.disabled = true;
           try {
-            await api.post("/api/notifications/test", { channel: key, config: { ...c, use_proxy: proxySwitch.checked } });
-            toast(`${title} 测试消息已发送`);
+            const res = await api.post("/api/notifications/test", {
+              channel: key,
+              config: collectFullConfig(),
+            });
+            const detail = res?.results?.[0]?.detail || "";
+            toast(res?.ok ? `${title} 测试消息发送成功` : `${title} 发送失败：${detail}`, res?.ok ? "info" : "danger");
+            await renderNotificationsTab(root);
           } catch (err) {
             toast(`测试失败：${err.message}`, "danger");
           } finally {
@@ -352,13 +397,7 @@ async function renderNotificationsTab(root) {
         e.preventDefault();
         saveBtn.disabled = true;
         try {
-          await api.put("/api/notifications", {
-            enabled: globalEnabled.checked,
-            cooldown_minutes: Number(cooldownIn.value || 0),
-            notify_on_recovery: recoverySwitch.checked,
-            use_proxy: proxySwitch.checked,
-            channels: chState,
-          });
+          await api.put("/api/notifications", collectFullConfig());
           toast("已保存告警推送配置");
         } catch (err) {
           toast(`保存失败：${err.message}`, "danger");
@@ -376,14 +415,34 @@ async function renderNotificationsTab(root) {
     el(
       "div",
       { class: "form-grid-3" },
-      el("div", { class: "field" }, el("label", null, "同类型告警冷却时间 (分钟)"), cooldownIn),
+      el("div", { class: "field" }, el("label", null, "同类型告警冷却 (分钟)"), cooldownIn),
       el("div", { class: "field", style: { justifyContent: "flex-end" } }, el("label", { class: "switch-inline" }, recoverySwitch, el("span", null, "故障恢复时推送通知"))),
       el("div", { class: "field", style: { justifyContent: "flex-end" } }, el("label", { class: "switch-inline" }, proxySwitch, el("span", null, "推送请求走全局代理")))
+    ),
+    el(
+      "div",
+      { class: "row-actions", style: { gap: "1rem", flexWrap: "wrap" } },
+      el("span", { class: "muted xs" }, "触发事件："),
+      ...["auth_error", "failed", "partial"].map((evKey) =>
+        el(
+          "label",
+          { class: "switch-inline xs" },
+          el("input", {
+            type: "checkbox",
+            checked: notifyOnSet.has(evKey),
+            onChange: (e) => {
+              if (e.target.checked) notifyOnSet.add(evKey);
+              else notifyOnSet.delete(evKey);
+            },
+          }),
+          el("span", null, evKey === "auth_error" ? "认证/Cookie失效" : evKey === "failed" ? "任务失败" : "部分失败")
+        )
+      )
     ),
     makeChannelCard("telegram", "Telegram Bot", [
       { prop: "bot_token", label: "Bot Token", secret: true, placeholder: "123456:ABC-DEF..." },
       { prop: "chat_id", label: "Chat ID", placeholder: "-1001234567890" },
-      { prop: "thread_id", label: "Topic Thread ID (可选)", placeholder: "留空发往主会话" },
+      { prop: "api_base", label: "API Base URL (反代可选)", placeholder: "https://api.telegram.org" },
     ]),
     makeChannelCard("feishu", "飞书 / Lark 群机器人 Webhook", [
       { prop: "webhook_url", label: "Webhook URL", placeholder: "https://open.feishu.cn/open-apis/bot/v2/hook/..." },
@@ -396,7 +455,7 @@ async function renderNotificationsTab(root) {
     ]),
     makeChannelCard("webhook", "自定义通用 Webhook (POST JSON)", [
       { prop: "url", label: "目标 URL", placeholder: "https://your-webhook.example/hook" },
-      { prop: "secret", label: "HMAC / Bearer Secret (可选)", secret: true },
+      { prop: "headers_json", label: "自定义 Headers (JSON)", placeholder: '{"Authorization": "Bearer ..."}' },
     ]),
     el("div", { class: "row-actions", style: { justifyContent: "flex-end" } }, saveBtn)
   );
@@ -409,12 +468,12 @@ async function renderNotificationsTab(root) {
       ? el(
           "div",
           { class: "stack xs-gap" },
-          ...logs.slice(0, 10).map((l) =>
+          ...logs.slice(0, 15).map((l) =>
             el(
               "div",
               { class: "fl-sub-card row-actions between" },
-              el("span", { class: "sm" }, `[${l.channel || "system"}] ${l.title || l.message || ""}`),
-              el("span", { class: `fl-badge ${l.ok === false ? "err" : "ok"}` }, l.ok === false ? "失败" : "已发送"),
+              el("span", { class: "sm" }, `[${l.channel || "system"}] ${l.detail || ""}`),
+              el("span", { class: `fl-badge ${l.status === "sent" ? "ok" : "err"}` }, l.status === "sent" ? "已发送" : "失败"),
               el("span", { class: "muted xs" }, fmtTimeShort(l.created_at))
             )
           )
@@ -431,7 +490,7 @@ async function renderCookiesTab(root) {
     api.get("/api/twitter-sync/status").catch(() => null),
   ]);
 
-  const files = inputsRes?.files || inputsRes?.items || (Array.isArray(inputsRes) ? inputsRes : []);
+  const files = Array.isArray(inputsRes?.files) ? inputsRes.files : [];
   const filePicker = el("input", { type: "file", accept: ".txt,text/plain", class: "fl-file-input" });
   const listEl = el("div", { class: "stack xs-gap" });
 
@@ -442,7 +501,7 @@ async function renderCookiesTab(root) {
       return;
     }
     for (const f of items) {
-      const name = typeof f === "string" ? f : f.filename || f.name;
+      const name = typeof f === "string" ? f : f.name || f.filename;
       listEl.appendChild(
         el(
           "div",
@@ -451,6 +510,7 @@ async function renderCookiesTab(root) {
             "div",
             null,
             el("strong", { class: "sm" }, name),
+            f.url_count !== undefined ? el("span", { class: "muted xs", style: { marginInlineStart: "0.5rem" } }, `${f.url_count} 条链接`) : null,
             f.size ? el("span", { class: "muted xs", style: { marginInlineStart: "0.5rem" } }, fmtBytes(f.size)) : null
           ),
           el(
@@ -485,10 +545,14 @@ async function renderCookiesTab(root) {
           toast("请先选择一个本地 .txt 文件", "danger");
           return;
         }
-        const content = await f.text();
-        await api.post("/api/inputs/upload", { filename: f.name, content });
-        toast(`已上传 ${f.name} 到 /data/inputs/`);
-        await renderCookiesTab(root);
+        try {
+          const content = await f.text();
+          await api.post("/api/inputs/upload", { filename: f.name, content });
+          toast(`已上传 ${f.name} 到 /data/inputs/`);
+          await renderCookiesTab(root);
+        } catch (err) {
+          toast(`上传失败：${err.message}`, "danger");
+        }
       },
     },
     "上传到 NAS 列表"
@@ -508,13 +572,13 @@ async function renderCookiesTab(root) {
       el(
         "section",
         { class: "fl-card stack sm-gap" },
-        el("h2", { class: "fl-card-title", style: { margin: 0 } }, "Twitter / X Cookie 同步中心"),
+        el("h2", { class: "fl-card-title", style: { margin: 0 } }, "Twitter / X 永久红心同步中心"),
         el(
           "div",
           { class: "muted sm" },
-          syncRes?.token_configured
-            ? `已启用同步令牌 · 最近同步：${syncRes.last_sync_at || "尚未触发"}`
-            : "尚未初始化 Twitter 同步，可前往站点详情页一键生成令牌并安装油猴脚本。"
+          syncRes?.token
+            ? `同步令牌已就绪 · 已归档 ${syncRes.count ?? 0} 条推文 ID（Archive ${syncRes.sources?.archive_sqlite ?? 0} / 磁盘 ${syncRes.sources?.disk ?? 0} / like.js ${syncRes.sources?.archive_js ?? 0} / 浏览器 ${syncRes.sources?.browser ?? 0}）`
+            : "尚未获取同步状态，可前往站点详情页管理。"
         ),
         el(
           "div",
@@ -527,7 +591,8 @@ async function renderCookiesTab(root) {
               class: "fl-btn sm",
               onClick: async () => {
                 const res = await api.post("/api/twitter-sync/scan-disk", {});
-                toast(res?.message || `扫描完成（回填 ${res?.inserted ?? 0} 条）`);
+                toast(`扫描完成（新增回填 ${res?.inserted ?? 0} 条，总计 ${res?.count ?? 0} 条）`);
+                await renderCookiesTab(root);
               },
             },
             "扫描磁盘回填 Archive"
@@ -539,34 +604,68 @@ async function renderCookiesTab(root) {
 }
 
 async function renderRawTab(root, ctx) {
-  const rawRes = await api.get("/api/config/raw");
-  const rawText = typeof rawRes === "string" ? rawRes : rawRes?.content || JSON.stringify(rawRes?.config || rawRes || {}, null, 2);
-  const snapshots = rawRes?.snapshots || [];
+  // Fetch raw JSON AND snapshot history from /api/config/overview
+  const [rawRes, overviewRes] = await Promise.all([
+    api.get("/api/config/raw"),
+    api.get("/api/config/overview").catch(() => null),
+  ]);
+
+  let rawText = typeof rawRes === "string"
+    ? rawRes
+    : rawRes?.config_json ?? rawRes?.content ?? JSON.stringify(rawRes?.config || rawRes || {}, null, 2);
+
+  // Guard against double-encoded JSON strings
+  if (typeof rawText === "string" && rawText.trim().startsWith('"')) {
+    try {
+      const inner = JSON.parse(rawText);
+      if (typeof inner === "string") rawText = inner;
+    } catch {
+      // keep rawText
+    }
+  }
+
+  const snapshots = Array.isArray(overviewRes?.snapshots)
+    ? overviewRes.snapshots
+    : Array.isArray(rawRes?.snapshots)
+      ? rawRes.snapshots
+      : [];
 
   const editor = el("textarea", {
-    rows: 18,
+    rows: 20,
     value: rawText,
     style: { fontFamily: "var(--fl-mono)", fontSize: "0.78rem" },
+  });
+  const noteIn = el("input", {
+    type: "text",
+    placeholder: "本次修改备注（可选，例如：手动编辑站点 Cookie）",
+    style: { flex: 1, minInlineSize: "200px" },
   });
 
   const saveBtn = el("button", { type: "button", class: "fl-btn accent" }, "保存原始配置 JSON");
   saveBtn.addEventListener("click", async () => {
+    let parsed = null;
     try {
-      JSON.parse(editor.value);
+      parsed = JSON.parse(editor.value);
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        throw new Error("根配置必须是 JSON 对象");
+      }
     } catch (err) {
-      toast(`JSON 语法错误：${err.message}`, "danger");
+      toast(`JSON 格式校验失败：${err.message}`, "danger");
       return;
     }
     const ok = await confirmModal({
-      title: "覆写 gallery-dl.json",
-      message: "保存前系统会自动备份当前配置快照。确定写入修改后的 JSON 吗？",
+      title: "保存 gallery-dl 原始配置",
+      message: "保存前系统会自动生成历史快照并标准化容器运行参数。确定写入修改后的 JSON 吗？",
       okText: "写入配置",
     });
     if (!ok) return;
     saveBtn.disabled = true;
     try {
-      await api.put("/api/config/raw", { content: editor.value });
-      toast("已写入原始配置 JSON");
+      await api.put("/api/config/raw", {
+        config_json: editor.value,
+        note: noteIn.value.trim() || "手动编辑 JSON 配置",
+      });
+      toast("已写入原始配置并生成历史快照");
       await ctx?.refreshHeader?.();
       await renderRawTab(root, ctx);
     } catch (err) {
@@ -579,7 +678,7 @@ async function renderRawTab(root, ctx) {
   const snapList = el(
     "section",
     { class: "fl-card stack sm-gap" },
-    el("h2", { class: "fl-card-title", style: { margin: 0 } }, "配置历史快照"),
+    el("h2", { class: "fl-card-title", style: { margin: 0 } }, `配置历史快照 (${snapshots.length})`),
     snapshots.length
       ? el(
           "div",
@@ -588,7 +687,12 @@ async function renderRawTab(root, ctx) {
             el(
               "div",
               { class: "fl-sub-card row-actions between" },
-              el("div", null, el("strong", { class: "sm" }, `快照 #${s.id}`), el("div", { class: "muted xs" }, `${fmtTimeShort(s.created_at)} · ${s.reason || "手动/修改备份"}`)),
+              el(
+                "div",
+                null,
+                el("strong", { class: "sm" }, `快照 #${s.id}`),
+                el("div", { class: "muted xs" }, `${fmtTimeShort(s.created_at)} · ${s.note || s.reason || "配置变更备份"}`)
+              ),
               el(
                 "button",
                 {
@@ -596,14 +700,15 @@ async function renderRawTab(root, ctx) {
                   class: "fl-btn sm",
                   onClick: async () => {
                     const ok = await confirmModal({
-                      title: "恢复历史快照",
-                      message: `确定恢复快照 #${s.id} 吗？当前配置将自动再备份一次。`,
+                      title: "回滚历史快照",
+                      message: `确定恢复到快照 #${s.id} (${s.note || fmtTimeShort(s.created_at)}) 吗？`,
                       okText: "恢复此版本",
                       danger: true,
                     });
                     if (!ok) return;
                     await api.post(`/api/config/snapshots/${encodeURIComponent(s.id)}/restore`, {});
-                    toast(`已恢复配置快照 #${s.id}`);
+                    toast(`已回滚至快照 #${s.id}`);
+                    await ctx?.refreshHeader?.();
                     await renderRawTab(root, ctx);
                   },
                 },
@@ -625,7 +730,7 @@ async function renderRawTab(root, ctx) {
         el(
           "div",
           { class: "row-actions between" },
-          el("h2", { class: "fl-card-title", style: { margin: 0 } }, "gallery-dl.json 原始编辑器"),
+          el("h2", { class: "fl-card-title", style: { margin: 0 } }, "gallery-dl 原始 JSON 编辑器"),
           el(
             "div",
             { class: "row-actions" },
@@ -657,7 +762,7 @@ async function renderRawTab(root, ctx) {
           )
         ),
         editor,
-        el("div", { class: "row-actions", style: { justifyContent: "flex-end" } }, saveBtn)
+        el("div", { class: "row-actions between" }, noteIn, saveBtn)
       ),
       snapList
     )

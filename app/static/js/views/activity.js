@@ -17,26 +17,23 @@ export async function renderActivity(container, _route, ctx) {
   let destroyed = false;
 
   async function loadAndRender() {
-    const [dash, healthRes] = await Promise.all([
+    const [dash, healthRes, sitesRes] = await Promise.all([
       api.get("/api/dashboard"),
       api.get("/health", { noAuthRedirect: true }).catch(() => null),
+      api.get("/api/sites/health").catch(() => null),
     ]);
     if (destroyed) return;
 
-    const kpis = dash?.kpis || dash?.stats || {};
-    const activeRuns = dash?.active_runs || dash?.running_runs || [];
-    const queuedRuns = dash?.queued_runs || [];
-    const liveQueue = [...activeRuns, ...queuedRuns];
-    const recentRuns = dash?.recent_runs || [];
-    const upcoming = dash?.upcoming_tasks || dash?.next_tasks || [];
-    const insights = dash?.insights || dash?.recommendations || [];
-    const siteHealth = dash?.site_health || dash?.sites_summary || [];
-    const notice = dash?.import_notice || dash?.migration_notice;
-    const historyBars = dash?.trend || dash?.daily_stats || [];
+    const stats = dash?.stats || {};
+    const activeRuns = Array.isArray(dash?.active_runs) ? dash.active_runs : [];
+    const recentRuns = Array.isArray(dash?.recent_runs) ? dash.recent_runs : [];
+    const recentAlerts = Array.isArray(dash?.recent_alerts) ? dash.recent_alerts : [];
+    const upcoming = Array.isArray(dash?.upcoming_tasks) ? dash.upcoming_tasks : [];
+    const storage = dash?.storage_summary || {};
+    const siteHealth = Array.isArray(sitesRes?.sites) ? sitesRes.sites : [];
 
     const page = el("div", { class: "stack" });
 
-    // Page header
     page.appendChild(
       el(
         "div",
@@ -45,7 +42,11 @@ export async function renderActivity(container, _route, ctx) {
           "div",
           null,
           el("h1", { class: "fl-page-title", style: { margin: 0, fontSize: "1.35rem" } }, "动态总览"),
-          el("div", { class: "muted xs" }, "调度队列、运行趋势、异常处理建议与站点健康状态")
+          el(
+            "div",
+            { class: "muted xs" },
+            `Archive 去重条目 ${storage.archive_entries ?? 0} · Twitter 红心库 ${storage.twitter_sync_ids ?? 0} · NAS 列表 ${storage.input_files_count ?? 0}`
+          )
         ),
         el(
           "div",
@@ -56,8 +57,7 @@ export async function renderActivity(container, _route, ctx) {
       )
     );
 
-    // Optional legacy import notice banner
-    if (notice && (notice.show || notice.pending_count > 0)) {
+    if (dash?.legacy_import_notice) {
       page.appendChild(
         el(
           "div",
@@ -65,8 +65,8 @@ export async function renderActivity(container, _route, ctx) {
           el(
             "div",
             { style: { flex: 1 } },
-            el("strong", null, notice.title || "检测到已迁移原容器定时任务"),
-            el("div", { class: "xs muted" }, notice.message || `共有 ${notice.pending_count || ""} 个待确认任务，默认为暂停状态以避免与旧容器冲突。`)
+            el("strong", null, "已导入初始定时任务（默认暂停）"),
+            el("div", { class: "xs muted" }, "为避免与旧容器同时争抢 Cookie 或写入目录，导入的任务默认处于暂停状态；确认旧容器已停用后可一键启用。")
           ),
           el(
             "div",
@@ -102,13 +102,12 @@ export async function renderActivity(container, _route, ctx) {
       );
     }
 
-    // 4 KPI Cards
-    const runningCount = kpis.running_count ?? healthRes?.running_count ?? activeRuns.length;
-    const queuedCount = kpis.queued_count ?? healthRes?.queued_count ?? queuedRuns.length;
-    const todayFiles = kpis.today_downloaded ?? kpis.downloaded_today ?? 0;
-    const weekFiles = kpis.week_downloaded ?? kpis.downloaded_7d ?? 0;
-    const enabledTasks = kpis.enabled_tasks ?? 0;
-    const totalTasks = kpis.total_tasks ?? 0;
+    const runningCount = stats.running_count ?? healthRes?.running_count ?? 0;
+    const queuedCount = stats.queued_count ?? healthRes?.queued_count ?? 0;
+    const todayFiles = stats.today_downloaded ?? 0;
+    const weekFiles = stats.week_downloaded ?? 0;
+    const enabledTasks = stats.task_enabled ?? 0;
+    const totalTasks = stats.task_total ?? 0;
 
     page.appendChild(
       el(
@@ -119,7 +118,7 @@ export async function renderActivity(container, _route, ctx) {
           { class: "fl-stat-card" },
           el("span", { class: "fl-stat-label" }, "运行中 / 排队"),
           el("strong", null, `${runningCount} / ${queuedCount}`),
-          el("div", { class: "muted xs" }, healthRes?.scheduler_paused ? "全局调度已暂停" : "自动调度运行中")
+          el("div", { class: "muted xs" }, dash?.scheduler_paused ? "全局调度已暂停" : "自动调度运行中")
         ),
         el(
           "div",
@@ -133,14 +132,14 @@ export async function renderActivity(container, _route, ctx) {
           { class: "fl-stat-card" },
           el("span", { class: "fl-stat-label" }, "近 7 天累计入库"),
           el("strong", null, String(weekFiles)),
-          historyBars.length
+          recentRuns.length
             ? el(
                 "div",
-                { class: "health-bars", style: { marginTop: "0.25rem" }, title: "近 7 天下载活跃度" },
-                ...historyBars.slice(-14).map((b) =>
+                { class: "health-bars", style: { marginTop: "0.25rem" }, title: "近期运行结果趋势" },
+                ...recentRuns.slice(0, 12).reverse().map((r) =>
                   el("span", {
-                    class: `health-bar ${b.status || (b.failed > 0 ? "partial" : "success")}`,
-                    title: `${b.date || ""}: +${b.downloaded || b.count || 0}`,
+                    class: `health-bar ${r.status}`,
+                    title: `#${r.id} ${r.task_name}: +${r.downloaded_count ?? 0}`,
                   })
                 )
               )
@@ -148,30 +147,22 @@ export async function renderActivity(container, _route, ctx) {
         ),
         el(
           "div",
-          { class: `fl-stat-card${enabledTasks === 0 && totalTasks > 0 ? " warn" : ""}` },
+          { class: `fl-stat-card${stats.task_failing > 0 ? " warn" : ""}` },
           el("span", { class: "fl-stat-label" }, "已启用定时任务"),
           el("strong", null, `${enabledTasks} / ${totalTasks}`),
-          el("div", { class: "muted xs" }, "支持任务级代理与后处理")
+          el("div", { class: "muted xs" }, stats.task_failing > 0 ? `${stats.task_failing} 个任务近期存在异常` : "全部任务状态正常")
         )
       )
     );
 
-    // Insights / actionable recommendations
-    if (insights.length) {
+    if (recentAlerts.length) {
       const insCard = el(
         "section",
         { class: "fl-card stack sm-gap" },
-        el("h2", { class: "fl-card-title", style: { margin: 0 } }, `待处理异常 (${insights.length})`)
+        el("h2", { class: "fl-card-title", style: { margin: 0 } }, `近期异常运行 (${recentAlerts.length})`)
       );
-      for (const ins of insights) {
-        const sevCls = ins.severity === "error" ? "danger" : ins.severity === "warn" ? "warn" : "info";
-        const targetRoute = ins.site
-          ? `#site/${encodeURIComponent(ins.site)}`
-          : ins.task_id
-            ? `#task/${ins.task_id}`
-            : ins.run_id
-              ? `#runs/${ins.run_id}`
-              : null;
+      for (const r of recentAlerts.slice(0, 4)) {
+        const sevCls = r.status === "partial" ? "warn" : "danger";
         insCard.appendChild(
           el(
             "div",
@@ -179,27 +170,24 @@ export async function renderActivity(container, _route, ctx) {
             el(
               "div",
               { style: { flex: 1 } },
-              el("strong", { class: "sm" }, ins.title || ins.kind || "需要关注"),
-              ins.message ? el("div", { class: "xs muted" }, ins.message) : null
+              el("strong", { class: "sm" }, `#${r.id} ${r.task_name}`),
+              el("div", { class: "xs muted" }, r.error_summary || r.error_category || `状态：${r.status}`)
             ),
-            targetRoute
-              ? el(
-                  "button",
-                  {
-                    type: "button",
-                    class: "fl-btn sm",
-                    onClick: () => navigate(targetRoute),
-                  },
-                  ins.action_label || (ins.site ? "去处理凭据" : "查看详情")
-                )
-              : null
+            el(
+              "button",
+              {
+                type: "button",
+                class: "fl-btn sm",
+                onClick: () => navigate(`#runs/${r.id}`),
+              },
+              "查看日志"
+            )
           )
         );
       }
       page.appendChild(insCard);
     }
 
-    // Main 2-column grid
     const leftCol = el("div", { class: "stack" });
     const rightCol = el("div", { class: "stack" });
 
@@ -214,10 +202,10 @@ export async function renderActivity(container, _route, ctx) {
         el("a", { class: "fl-btn subtle xs", href: "#runs" }, "查看全部记录 →")
       )
     );
-    if (!liveQueue.length) {
+    if (!activeRuns.length) {
       queueCard.appendChild(el("div", { class: "empty-state" }, "当前没有正在运行或排队中的下载任务"));
     } else {
-      for (const r of liveQueue) {
+      for (const r of activeRuns) {
         queueCard.appendChild(
           el(
             "div",
@@ -229,9 +217,9 @@ export async function renderActivity(container, _route, ctx) {
                 "div",
                 { class: "row-actions xs-gap" },
                 statusBadge(r.status),
-                el("a", { href: `#runs/${r.id}`, class: "sm", style: { fontWeight: 600 } }, `#${r.id} ${r.task_name || r.label || "即时下载"}`)
+                el("a", { href: `#runs/${r.id}`, class: "sm", style: { fontWeight: 600 } }, `#${r.id} ${r.task_name || "即时下载"}`)
               ),
-              el("div", { class: "muted xs" }, `已下载 +${r.files_downloaded ?? 0} · 跳过 ${r.files_skipped ?? 0} · ${fmtTimeShort(r.started_at || r.created_at)}`)
+              el("div", { class: "muted xs" }, `已下载 +${r.downloaded_count ?? 0} · 跳过 ${r.skipped_count ?? 0} · ${fmtTimeShort(r.started_at || r.created_at)}`)
             ),
             el(
               "button",
@@ -277,7 +265,7 @@ export async function renderActivity(container, _route, ctx) {
               "div",
               { style: { minWidth: 0, flex: 1 } },
               el("a", { href: `#task/${t.id}`, class: "sm", style: { fontWeight: 600 } }, t.name || `任务 #${t.id}`),
-              el("div", { class: "muted xs" }, `Cron: ${t.cron_expr} · 下次执行 ${relTime(t.next_run_at)}`)
+              el("div", { class: "muted xs" }, `${t.cron_desc || t.cron_expr} · 下次执行 ${relTime(t.next_run_at)}`)
             ),
             el(
               "button",
@@ -320,13 +308,13 @@ export async function renderActivity(container, _route, ctx) {
             el(
               "div",
               { class: "run-item-top" },
-              el("span", { class: "run-item-title" }, `#${r.id} ${r.task_name || r.label || "下载任务"}`),
+              el("span", { class: "run-item-title" }, `#${r.id} ${r.task_name || "下载任务"}`),
               statusBadge(r.status)
             ),
             el(
               "div",
               { class: "run-item-meta" },
-              `+${r.files_downloaded ?? 0} 新增 · ${r.files_skipped ?? 0} 跳过 · ${fmtDuration(r.duration_seconds)} · ${fmtTimeShort(r.created_at)}`
+              `+${r.downloaded_count ?? 0} 新增 · ${r.skipped_count ?? 0} 跳过 · ${fmtDuration(r.duration_sec)} · ${fmtTimeShort(r.created_at)}`
             )
           )
         );
@@ -335,7 +323,7 @@ export async function renderActivity(container, _route, ctx) {
     rightCol.appendChild(recentCard);
 
     // Site health card
-    if (Array.isArray(siteHealth) && siteHealth.length) {
+    if (siteHealth.length) {
       const shCard = el(
         "section",
         { class: "fl-card stack sm-gap" },
@@ -347,8 +335,8 @@ export async function renderActivity(container, _route, ctx) {
         ),
         el(
           "div",
-          { class: "row-actions", style: { gap: "0.45rem" } },
-          ...siteHealth.map((s) =>
+          { class: "row-actions", style: { gap: "0.45rem", flexWrap: "wrap" } },
+          ...siteHealth.slice(0, 8).map((s) =>
             el(
               "a",
               { class: "fl-btn sm", href: `#site/${encodeURIComponent(s.site)}` },
