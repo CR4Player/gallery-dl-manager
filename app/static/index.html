@@ -7,9 +7,8 @@
   <script>
     try {
       const saved = localStorage.getItem("color-scheme");
-      if (saved === "light" || saved === "dark") {
-        document.querySelector('meta[name="color-scheme"]').content = saved;
-      }
+      document.querySelector('meta[name="color-scheme"]').content =
+        (saved === "light" || saved === "dark") ? saved : "light dark";
     } catch {}
   </script>
   <title>gallery-dl-manager</title>
@@ -18,23 +17,25 @@
 <body>
   <header class="topbar">
     <div class="topbar-inner">
-      <div class="brand">
+      <a href="#/" class="brand">
         <span class="brand-badge">GDL</span>
-        <div>
+        <span>
           <strong>gallery-dl-manager</strong>
           <span class="version-line muted" id="version-line">加载中…</span>
-        </div>
-      </div>
+        </span>
+      </a>
 
-      <nav class="tabs" aria-label="主导航">
-        <button type="button" class="tab-btn active" data-view="dashboard">总览</button>
-        <button type="button" class="tab-btn" data-view="tasks">定时任务</button>
-        <button type="button" class="tab-btn" data-view="runs">运行日志</button>
-        <button type="button" class="tab-btn" data-view="config">配置与凭据</button>
-        <button type="button" class="tab-btn" data-view="notifications">失败通知</button>
+      <nav class="nav-links" aria-label="主导航">
+        <a class="nav-link" data-nav="activity" href="#/">动态</a>
+        <a class="nav-link" data-nav="tasks" href="#/tasks">任务</a>
+        <a class="nav-link" data-nav="runs" href="#/runs">运行</a>
+        <a class="nav-link" data-nav="sites" href="#/sites">站点</a>
+        <a class="nav-link" data-nav="settings" href="#/settings/general">设置</a>
       </nav>
 
       <div class="topbar-actions">
+        <button type="button" id="open-download-btn" class="btn primary sm">＋ 新下载</button>
+        <button type="button" id="scheduler-pill" class="pill-btn" title="切换全局定时调度状态" data-paused="0">调度中</button>
         <button type="button" id="alerts-bell-btn" class="btn ghost sm bell-btn" popovertarget="alerts-popover" aria-label="通知与异常告警" title="异常告警与通知">
           <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/>
@@ -52,762 +53,113 @@
           </div>
           <div id="alerts-pop-list" class="alerts-pop-list"></div>
         </div>
-        <button type="button" id="scheduler-pill" class="pill-btn" title="切换全局定时调度状态">调度中</button>
-        <button type="button" id="logout-btn" class="btn ghost sm">退出</button>
       </div>
     </div>
   </header>
 
-  <main class="container">
-    <div id="legacy-banner" class="notice warn hidden">
-      <div class="banner-row">
-        <div>
-          <strong>已导入原容器配置，定时任务当前为暂停状态</strong>
-          <div class="muted sm">为避免与仍在运行的旧版 <code>gallery-dl</code> 容器并发抢写，导入的 3 个定时任务默认未启用。确认停止旧容器后，可在此一键全部启用。</div>
-        </div>
-        <div class="row-actions">
-          <button type="button" class="btn primary sm" id="enable-all-tasks-btn">一键启用全部任务</button>
-          <button type="button" class="btn ghost sm" id="dismiss-legacy-banner-btn">知道了</button>
-        </div>
-      </div>
-    </div>
-
-    <!-- VIEW: DASHBOARD -->
-    <section id="view-dashboard" class="view active">
-      <div class="stats-grid" id="stats-grid">
-        <div class="card stat-card"><span class="muted sm">运行中 / 排队</span><strong id="stat-active">0 / 0</strong></div>
-        <div class="card stat-card"><span class="muted sm">今日新增文件</span><strong id="stat-today">0</strong></div>
-        <div class="card stat-card"><span class="muted sm">近 7 天新增</span><strong id="stat-week">0</strong></div>
-        <div class="card stat-card"><span class="muted sm">已启用定时任务</span><strong id="stat-tasks">0 / 0</strong></div>
-      </div>
-
-      <div class="two-col">
-        <section class="card">
-          <div class="card-head">
-            <h2>快速单次下载</h2>
-            <span class="muted sm">立即入队执行，不影响定时任务</span>
-          </div>
-          <form id="adhoc-form" class="stack" novalidate>
-            <div class="field">
-              <label for="adhoc-urls">目标 URL（每行一个，或下方选择 .txt 链接文件）</label>
-              <span id="adhoc-urls-hint" class="hint">支持单条粘贴或上传 <code>rule34-fav-*-ids.txt</code>（多链接自动走 <code>gallery-dl -i</code>）</span>
-              <textarea id="adhoc-urls" rows="3" placeholder="https://x.com/..." aria-describedby="adhoc-urls-hint" data-error="adhoc-urls-error"></textarea>
-              <div id="adhoc-urls-error" class="error-msg"><span role="img" aria-label="错误">❌</span> 请至少输入一个 URL 或选择一个 .txt 文件。</div>
-              <div class="file-picker-row">
-                <input id="adhoc-file" type="file" accept=".txt,text/plain" class="file-input">
-                <button type="button" class="btn ghost sm hidden" id="adhoc-file-clear">清除文件</button>
-              </div>
-              <div id="adhoc-file-status" class="sm muted hidden"></div>
-            </div>
-            <div class="form-grid-2">
-              <div class="field">
-                <label for="adhoc-proxy-mode">代理策略</label>
-                <select id="adhoc-proxy-mode">
-                  <option value="inherit">跟随全局代理</option>
-                  <option value="direct">直连（不用代理）</option>
-                  <option value="custom">自定义代理</option>
-                </select>
-              </div>
-              <div class="field" id="adhoc-proxy-custom-wrap" style="display:none">
-                <label for="adhoc-proxy-url">自定义代理地址</label>
-                <input id="adhoc-proxy-url" type="text" placeholder="http://host.docker.internal:7890">
-              </div>
-              <div class="field">
-                <label for="adhoc-subdir">子目录（可选）</label>
-                <input id="adhoc-subdir" type="text" placeholder="留空则按站点头目录归档">
-              </div>
-              <div class="field">
-                <label for="adhoc-pp-mode">ExifTool 后处理</label>
-                <select id="adhoc-pp-mode">
-                  <option value="inherit">按站点默认规则</option>
-                  <option value="enabled">内置 ExifTool（可指定日期字段）</option>
-                  <option value="custom">自定义后处理指令</option>
-                  <option value="disabled">禁用</option>
-                </select>
-              </div>
-              <div class="field">
-                <label for="adhoc-skip">Skip 策略覆盖（可选）</label>
-                <input id="adhoc-skip" type="text" placeholder="留空沿用全局；填 true 可扫全量跳过">
-              </div>
-              <div class="field">
-                <label for="adhoc-extra">额外参数（可选）</label>
-                <input id="adhoc-extra" type="text" placeholder="例如 --range 1-20 或 -K">
-              </div>
-            </div>
-            <div id="adhoc-pp-panel" class="sub-panel stack sm-gap hidden">
-              <div id="adhoc-pp-date-wrap" class="field hidden">
-                <label for="adhoc-pp-date">日期字段模板</label>
-                <input id="adhoc-pp-date" type="text" value="{date:%Y-%m-%dT%H:%M:%S}" placeholder="{date:%Y-%m-%dT%H:%M:%S}">
-              </div>
-              <div id="adhoc-pp-cmd-wrap" class="field hidden">
-                <label for="adhoc-pp-cmd">自定义 exec 指令</label>
-                <input id="adhoc-pp-cmd" type="text" placeholder='exiftool -overwrite_original -DateTimeOriginal="{date:%Y:%m:%d %H:%M:%S}" "{_path}"'>
-              </div>
-              <pre id="adhoc-pp-preview" class="cmd-preview"></pre>
-            </div>
-            <div class="row-actions between">
-              <div class="row-actions">
-                <label class="checkbox-inline"><input type="checkbox" switch role="switch" id="adhoc-simulate"> 仅模拟试跑</label>
-                <label class="checkbox-inline"><input type="checkbox" switch role="switch" id="adhoc-archive"> SQLite Archive</label>
-                <label class="checkbox-inline"><input type="checkbox" switch role="switch" id="adhoc-archive-backfill" disabled> 跳过时回填 Archive</label>
-              </div>
-              <button type="submit" class="btn primary">加入下载队列</button>
-            </div>
-          </form>
-        </section>
-
-        <section class="card">
-          <div class="card-head">
-            <h2>运行状态与计划预告</h2>
-            <button type="button" class="btn ghost sm" id="refresh-dashboard-btn">刷新</button>
-          </div>
-          <div id="active-runs-box" class="stack sm-gap"></div>
-          <h3 class="subhead">即将执行的定时任务</h3>
-          <div id="upcoming-tasks-box" class="stack sm-gap"></div>
-          <h3 class="subhead">存档与数据概览</h3>
-          <div id="storage-summary-box" class="mini-stats-grid"></div>
-        </section>
-      </div>
-
-      <section class="card">
-        <div class="card-head">
-          <h2>最近抓取记录</h2>
-          <button type="button" class="btn ghost sm" data-goto="runs">查看全部</button>
-        </div>
-        <div tabindex="0" role="region" aria-labelledby="dash-runs-cap" class="table-wrapper">
-          <table class="data-table">
-            <caption id="dash-runs-cap" class="visually-hidden">最近抓取运行记录</caption>
-            <thead>
-              <tr>
-                <th>ID</th>
-                <th>任务</th>
-                <th>触发</th>
-                <th>状态</th>
-                <th>新增 / 跳过</th>
-                <th>耗时</th>
-                <th>时间</th>
-                <th>操作</th>
-              </tr>
-            </thead>
-            <tbody id="dash-runs-tbody"></tbody>
-          </table>
-        </div>
-      </section>
-    </section>
-
-    <!-- VIEW: TASKS -->
-    <section id="view-tasks" class="view">
-      <div class="card">
-        <div class="card-head">
-          <div>
-            <h2>定时抓取任务</h2>
-            <p class="muted sm">每个任务独立配置 Cron 调度、代理策略、跳过阈值与 ExifTool 后处理</p>
-          </div>
-          <div class="row-actions">
-            <button type="button" class="btn ghost" id="tasks-batch-toggle-btn">批量管理</button>
-            <button type="button" class="btn primary" id="new-task-btn">+ 新建任务</button>
-          </div>
-        </div>
-        <div id="tasks-batch-bar" class="batch-bar hidden">
-          <div class="row-actions">
-            <label class="checkbox-inline"><input type="checkbox" class="checkbox-custom" id="tasks-select-all"> 全选</label>
-            <span id="tasks-batch-count" class="muted sm">已选 0 项</span>
-          </div>
-          <div class="row-actions">
-            <button type="button" class="btn ghost sm" data-batch-action="enable">批量启用</button>
-            <button type="button" class="btn ghost sm" data-batch-action="disable">批量停用</button>
-            <button type="button" class="btn danger sm" data-batch-action="delete">批量删除</button>
-            <button type="button" class="btn ghost sm" id="tasks-batch-exit-btn">退出多选</button>
-          </div>
-        </div>
-        <div tabindex="0" role="region" aria-labelledby="tasks-cap" class="table-wrapper">
-          <table class="data-table">
-            <caption id="tasks-cap" class="visually-hidden">定时抓取任务列表</caption>
-            <thead>
-              <tr>
-                <th id="tasks-batch-th" class="batch-col hidden" aria-label="选择">选择</th>
-                <th>任务名称</th>
-                <th>启用状态</th>
-                <th>调度计划 (Cron)</th>
-                <th>最近执行</th>
-                <th>操作</th>
-              </tr>
-            </thead>
-            <tbody id="tasks-tbody"></tbody>
-          </table>
-        </div>
-      </div>
-    </section>
-
-    <!-- VIEW: RUNS & LOGS -->
-    <section id="view-runs" class="view">
-      <div class="runs-layout">
-        <section class="card runs-list-card">
-          <div class="card-head">
-            <h2>运行历史</h2>
-            <select id="runs-status-filter" aria-label="按状态筛选">
-              <option value="">全部状态</option>
-              <option value="running">运行中</option>
-              <option value="queued">排队中</option>
-              <option value="success">成功</option>
-              <option value="partial">部分失败</option>
-              <option value="auth_error">认证失效</option>
-              <option value="failed">失败</option>
-              <option value="cancelled">已中止</option>
-            </select>
-          </div>
-          <div id="runs-list-box" class="run-cards"></div>
-        </section>
-
-        <section class="card run-detail-card">
-          <div class="card-head">
-            <div>
-              <h2 id="run-detail-title">选择左侧一条运行记录</h2>
-              <div class="muted sm" id="run-detail-meta">支持实时日志流 (SSE) 与新增文件清单</div>
-            </div>
-            <div class="row-actions" id="run-detail-actions"></div>
-          </div>
-
-          <div class="subtabs">
-            <button type="button" class="subtab-btn active" data-runtab="log">实时日志</button>
-            <button type="button" class="subtab-btn" data-runtab="files">新增文件列表 (<span id="run-files-count">0</span>)</button>
-          </div>
-
-          <div id="run-tab-log" class="run-tabpanel active">
-            <div class="log-toolbar">
-              <input type="search" id="log-search" placeholder="过滤日志关键词…" aria-label="过滤日志关键词">
-              <label class="checkbox-inline"><input type="checkbox" switch role="switch" id="log-only-errors"> 仅错误/警告</label>
-              <label class="checkbox-inline"><input type="checkbox" switch role="switch" id="log-autoscroll" checked> 自动滚底</label>
-            </div>
-            <div id="log-window-hint" class="muted sm hidden"></div>
-            <pre id="log-viewer" class="terminal" tabindex="0" aria-live="off"></pre>
-          </div>
-
-          <div id="run-tab-files" class="run-tabpanel">
-            <p class="muted sm">此处仅列出本次运行新下载落盘的文件路径（供核对进度；媒体预览请使用 Immich）。</p>
-            <ul id="run-files-list" class="file-path-list"></ul>
-          </div>
-        </section>
-      </div>
-    </section>
-
-    <!-- VIEW: CONFIG & CREDENTIALS -->
-    <section id="view-config" class="view">
-      <div class="two-col">
-        <section class="card">
-          <div class="card-head"><h2>全局下载与后处理设置</h2></div>
-          <form id="global-settings-form" class="stack">
-            <div class="field">
-              <label for="cfg-global-proxy">全局默认代理</label>
-              <span class="hint">宿主机代理可用 <code>http://host.docker.internal:端口</code>，直连留空</span>
-              <div class="input-with-btn">
-                <input id="cfg-global-proxy" type="text" placeholder="例如 http://host.docker.internal:7890">
-                <button type="button" class="btn ghost" id="test-proxy-btn">测试连通</button>
-              </div>
-              <div id="proxy-test-result" class="sm muted"></div>
-            </div>
-            <div class="form-grid-2">
-              <div class="field">
-                <label for="cfg-default-skip">全局 Skip 策略</label>
-                <input id="cfg-default-skip" type="text" placeholder="abort:7">
-              </div>
-              <div class="field">
-                <label for="cfg-retries">下载重试次数</label>
-                <input id="cfg-retries" type="number" min="0" max="20">
-              </div>
-              <div class="field">
-                <label for="cfg-timeout">请求超时 (秒)</label>
-                <input id="cfg-timeout" type="number" min="5" max="300">
-              </div>
-              <div class="field">
-                <label for="cfg-retention">日志保留天数</label>
-                <input id="cfg-retention" type="number" min="1" max="365">
-              </div>
-              <div class="field">
-                <label for="cfg-concurrency">最大并发任务数 (重启生效)</label>
-                <select id="cfg-concurrency">
-                  <option value="1">1 (推荐，稳妥串行)</option>
-                  <option value="2">2</option>
-                  <option value="3">3</option>
-                </select>
-              </div>
-              <div class="field">
-                <label for="cfg-pp-sites">默认启用 ExifTool 的站点</label>
-                <input id="cfg-pp-sites" type="text" placeholder="twitter,bluesky">
-              </div>
-            </div>
-            <button type="submit" class="btn primary">保存全局设置</button>
-          </form>
-        </section>
-
-        <section class="card">
-          <div class="card-head"><h2>界面主题与密码安全</h2></div>
-          <div class="stack">
-            <div class="field">
-              <span class="label-text">外观配色</span>
-              <span class="hint">默认跟随操作系统浅色 / 深色偏好</span>
-              <div class="segmented" role="radiogroup" aria-label="外观配色选择">
-                <button type="button" class="seg-btn" data-theme-choice="system" aria-pressed="true">跟随系统 (<span id="sys-scheme-hint"></span>)</button>
-                <button type="button" class="seg-btn" data-theme-choice="light" aria-pressed="false">浅色</button>
-                <button type="button" class="seg-btn" data-theme-choice="dark" aria-pressed="false">深色</button>
-              </div>
-            </div>
-
-            <hr class="divider">
-
-            <form id="change-password-form" class="stack" novalidate>
-              <h3 class="subhead">修改管理员登录密码</h3>
-              <div class="form-grid-2">
-                <div class="field">
-                  <label for="pw-current">当前密码</label>
-                  <input id="pw-current" type="password" required autocomplete="current-password">
-                </div>
-                <div class="field">
-                  <label for="pw-new">新密码 (≥6位)</label>
-                  <input id="pw-new" type="password" required minlength="6" autocomplete="new-password">
-                </div>
-              </div>
-              <button type="submit" class="btn ghost">更新登录密码</button>
-            </form>
-          </div>
-        </section>
-      </div>
-
-      <section class="card">
-        <div class="card-head">
-          <div>
-            <h2>站点凭据与 Cookie 管理</h2>
-            <p class="muted sm">支持直接粘贴浏览器导出的 Netscape cookies.txt、JSON 或 Cookie 请求头；运行日志会自动脱敏</p>
-          </div>
-          <div class="row-actions">
-            <button type="button" class="btn ghost" id="open-raw-config-btn">高级 JSON 编辑</button>
-            <button type="button" class="btn primary" id="add-site-btn">+ 添加站点配置</button>
-          </div>
-        </div>
-        <div tabindex="0" role="region" aria-labelledby="sites-cap" class="table-wrapper">
-          <table class="data-table">
-            <caption id="sites-cap" class="visually-hidden">站点凭据与配置</caption>
-            <thead>
-              <tr>
-                <th>站点</th>
-                <th>Cookie 数量</th>
-                <th>认证字段</th>
-                <th>文件命名模板</th>
-                <th>ExifTool 后处理</th>
-                <th>操作</th>
-              </tr>
-            </thead>
-            <tbody id="sites-tbody"></tbody>
-          </table>
-        </div>
-      </section>
-
-      <section class="card">
-        <div class="card-head">
-          <div>
-            <h2>Twitter 永久红心同步（油猴脚本）</h2>
-            <p class="muted sm">将 NAS 存档、本地已下载目录与 X 官方 <code>like.js</code> 汇总后同步给浏览器油猴脚本；X 未显示红心的老推文会永久标红并提示「已存」，避免重复点赞打断增量抓取</p>
-          </div>
-          <a class="btn primary" id="tw-download-script-btn" href="/api/twitter-sync/userscript.user.js">下载预配置油猴脚本 (.user.js)</a>
-        </div>
-        <div class="stack">
-          <div id="tw-sync-stats" class="muted sm">正在统计历史喜欢记录…</div>
-          <div class="field">
-            <label for="tw-sync-token">油猴同步 Token（只用于脚本读写 <code>/api/archive/twitter-ids</code>）</label>
-            <div class="input-with-btn">
-              <input id="tw-sync-token" type="password" readonly>
-              <button type="button" class="btn ghost sm" id="tw-token-toggle-btn">显示</button>
-              <button type="button" class="btn ghost sm" id="tw-token-copy-btn">复制</button>
-              <button type="button" class="btn ghost sm" id="tw-token-rotate-btn">重置</button>
-            </div>
-          </div>
-          <div class="row-actions between">
-            <div class="row-actions">
-              <button type="button" class="btn ghost sm" id="tw-scan-disk-btn">扫描 /gallery-dl/twitter 目录</button>
-              <div class="file-picker-row">
-                <input id="tw-likejs-file" type="file" accept=".js,.json,.txt" class="file-input">
-                <button type="button" class="btn ghost sm" id="tw-import-likejs-btn">导入 X 官方 like.js</button>
-              </div>
-            </div>
-            <span class="hint">脚本已在 Tampermonkey 中内嵌当前访问地址与 Token，下载后直接安装即可</span>
-          </div>
-        </div>
-      </section>
-
-      <section class="card">
-        <div class="card-head"><h2>配置变更历史快照</h2></div>
-        <div tabindex="0" role="region" aria-labelledby="snaps-cap" class="table-wrapper">
-          <table class="data-table">
-            <caption id="snaps-cap" class="visually-hidden">配置快照列表</caption>
-            <thead>
-              <tr>
-                <th>ID</th>
-                <th>时间</th>
-                <th>备注</th>
-                <th>操作</th>
-              </tr>
-            </thead>
-            <tbody id="snapshots-tbody"></tbody>
-          </table>
-        </div>
-      </section>
-    </section>
-
-    <!-- VIEW: NOTIFICATIONS -->
-    <section id="view-notifications" class="view">
-      <form id="notify-form" class="stack">
-        <section class="card">
-          <div class="card-head">
-            <div>
-              <h2>失败与异常通知设置</h2>
-              <p class="muted sm">支持任务失败、认证/Cookie 失效、403 拦截与恢复通知，并内置冷却防刷屏</p>
-            </div>
-            <label class="checkbox-inline"><input type="checkbox" switch role="switch" class="switch-ok" id="notif-enabled"> 启用失败通知</label>
-          </div>
-          <div class="form-grid-3">
-            <div class="field">
-              <span class="label-text">触发事件</span>
-              <div class="stack xs-gap">
-                <label class="checkbox-inline"><input type="checkbox" class="checkbox-custom notif-event" value="failed"> 任务完全失败 (failed)</label>
-                <label class="checkbox-inline"><input type="checkbox" class="checkbox-custom notif-event" value="auth_error"> Cookie / 认证失效 (auth_error)</label>
-                <label class="checkbox-inline"><input type="checkbox" class="checkbox-custom notif-event" value="partial"> 部分失败 / 403 拦截 (partial)</label>
-              </div>
-            </div>
-            <div class="field">
-              <label for="notif-cooldown">同类告警冷却时间 (分钟)</label>
-              <span class="hint">同一任务同类错误在冷却期内不重复刷屏</span>
-              <input id="notif-cooldown" type="number" min="0" max="10080" value="60">
-            </div>
-            <div class="field">
-              <span class="label-text">附加选项</span>
-              <div class="stack xs-gap">
-                <label class="checkbox-inline"><input type="checkbox" switch role="switch" id="notif-recovery"> 任务恢复正常时发送恢复通知</label>
-                <label class="checkbox-inline"><input type="checkbox" switch role="switch" id="notif-use-proxy"> 推送请求走全局代理（如 Telegram）</label>
-              </div>
-            </div>
-          </div>
-        </section>
-
-        <div class="two-col">
-          <section class="card">
-            <div class="card-head">
-              <h3>Telegram Bot</h3>
-              <label class="checkbox-inline"><input type="checkbox" switch role="switch" class="switch-ok" id="tg-enabled"> 启用</label>
-            </div>
-            <div class="stack">
-              <div class="field"><label for="tg-token">Bot Token</label><input id="tg-token" type="password" placeholder="123456:ABC-DEF..."></div>
-              <div class="field"><label for="tg-chat">Chat ID</label><input id="tg-chat" type="text" placeholder="例如 123456789"></div>
-              <div class="field"><label for="tg-base">API Base (反代可选)</label><input id="tg-base" type="url" value="https://api.telegram.org"></div>
-              <button type="button" class="btn ghost sm test-channel-btn" data-channel="telegram">发送 Telegram 测试</button>
-            </div>
-          </section>
-
-          <section class="card">
-            <div class="card-head">
-              <h3>飞书自定义机器人</h3>
-              <label class="checkbox-inline"><input type="checkbox" switch role="switch" class="switch-ok" id="fs-enabled"> 启用</label>
-            </div>
-            <div class="stack">
-              <div class="field"><label for="fs-url">Webhook URL</label><input id="fs-url" type="url" placeholder="https://open.feishu.cn/open-apis/bot/v2/hook/..."></div>
-              <div class="field"><label for="fs-secret">签名密钥 Secret（若机器人开启签名校验）</label><input id="fs-secret" type="password"></div>
-              <button type="button" class="btn ghost sm test-channel-btn" data-channel="feishu">发送飞书测试</button>
-            </div>
-          </section>
-
-          <section class="card">
-            <div class="card-head">
-              <h3>Bark (iOS)</h3>
-              <label class="checkbox-inline"><input type="checkbox" switch role="switch" class="switch-ok" id="bk-enabled"> 启用</label>
-            </div>
-            <div class="stack">
-              <div class="field"><label for="bk-server">Server URL</label><input id="bk-server" type="url" value="https://api.day.app"></div>
-              <div class="field"><label for="bk-key">Device Key</label><input id="bk-key" type="password"></div>
-              <div class="field"><label for="bk-group">推送分组</label><input id="bk-group" type="text" value="gallery-dl"></div>
-              <button type="button" class="btn ghost sm test-channel-btn" data-channel="bark">发送 Bark 测试</button>
-            </div>
-          </section>
-
-          <section class="card">
-            <div class="card-head">
-              <h3>通用 JSON Webhook</h3>
-              <label class="checkbox-inline"><input type="checkbox" switch role="switch" class="switch-ok" id="wh-enabled"> 启用</label>
-            </div>
-            <div class="stack">
-              <div class="field"><label for="wh-url">Webhook URL</label><input id="wh-url" type="url" placeholder="https://example.com/hook"></div>
-              <div class="field"><label for="wh-headers">自定义 Headers (JSON)</label><textarea id="wh-headers" rows="2">{"Authorization": ""}</textarea></div>
-              <button type="button" class="btn ghost sm test-channel-btn" data-channel="webhook">发送 Webhook 测试</button>
-            </div>
-          </section>
-        </div>
-
-        <div class="row-actions">
-          <button type="submit" class="btn primary">保存通知配置</button>
-          <span id="notif-test-status" class="muted sm"></span>
-        </div>
-      </form>
-
-      <section class="card">
-        <div class="card-head"><h2>近期通知发送记录</h2></div>
-        <div tabindex="0" role="region" aria-labelledby="notif-log-cap" class="table-wrapper">
-          <table class="data-table">
-            <caption id="notif-log-cap" class="visually-hidden">通知发送历史</caption>
-            <thead>
-              <tr>
-                <th>时间</th>
-                <th>关联 Run</th>
-                <th>通道</th>
-                <th>结果</th>
-                <th>详情</th>
-              </tr>
-            </thead>
-            <tbody id="notif-logs-tbody"></tbody>
-          </table>
-        </div>
-      </section>
-    </section>
+  <main id="app-main" class="container" tabindex="-1">
+    <div class="notice muted">正在加载控制台…</div>
   </main>
 
-  <!-- DIALOG: TASK EDITOR -->
-  <dialog id="task-dialog" closedby="closerequest" aria-labelledby="task-dialog-title">
-    <form id="task-form" class="dialog-form stack" novalidate>
-      <div class="dialog-head">
-        <h2 id="task-dialog-title">编辑定时任务</h2>
-        <button type="button" class="btn ghost sm dialog-close" data-close-dialog="task-dialog" aria-label="关闭弹窗">✕</button>
-      </div>
-      <input type="hidden" id="tf-id">
-      <div class="form-grid-2">
-        <div class="field">
-          <div class="label-row">
-            <label for="tf-name">任务名称</label>
-            <span class="hint">必填</span>
-          </div>
-          <input id="tf-name" type="text" required placeholder="例如 Twitter 点赞" data-error="tf-name-error">
-          <div id="tf-name-error" class="error-msg"><span role="img" aria-label="错误">❌</span> 请填写任务名称。</div>
-        </div>
-        <div class="field">
-          <div class="label-row">
-            <label for="tf-cron">Cron 表达式 (5 段)</label>
-            <span class="hint">分 时 日 月 周，如 <code>0 */6 * * *</code></span>
-          </div>
-          <input id="tf-cron" type="text" required value="0 */6 * * *" data-error="tf-cron-error">
-          <div id="tf-cron-error" class="error-msg"><span role="img" aria-label="错误">❌</span> 请输入 5 段 Cron 表达式。</div>
-        </div>
-      </div>
-      <div id="tf-cron-preview" class="notice info sm"></div>
-      <div class="field">
-        <div class="label-row">
-          <label for="tf-source-mode">抓取来源</label>
-          <span class="hint">可选直填 URL 或绑定 NAS 列表文件 (<code>-i</code>)</span>
-        </div>
-        <select id="tf-source-mode">
-          <option value="urls">直接填写 URL 列表</option>
-          <option value="input_file">NAS 输入文件 (/data/inputs/*.txt)</option>
-        </select>
-      </div>
-      <div class="field" id="tf-urls-wrap">
-        <label for="tf-urls">抓取 URL（每行一个）</label>
-        <textarea id="tf-urls" rows="3" data-error="tf-urls-error"></textarea>
-        <div id="tf-urls-error" class="error-msg"><span role="img" aria-label="错误">❌</span> 至少输入一个 URL。</div>
-      </div>
-      <div class="sub-panel stack sm-gap hidden" id="tf-input-file-wrap">
-        <div class="field">
-          <label for="tf-input-file">选择输入文件（容器目录 <code>/data/inputs/</code>）</label>
-          <span class="hint">可在下方直接上传覆盖 <code>.txt</code>，或由宿主机写入挂载到容器 <code>/data/inputs/</code> 的目录；对于最新在前的单帖列表，日常增量建议 Skip 填 <code>exit:10</code></span>
-          <div class="input-with-btn">
-            <select id="tf-input-file"></select>
-            <button type="button" class="btn ghost sm" id="tf-refresh-inputs-btn">刷新</button>
-          </div>
-        </div>
-        <div class="field">
-          <label for="tf-upload-input-file">从本地上传 / 更新 .txt 列表文件</label>
-          <div class="file-picker-row">
-            <input id="tf-upload-input-file" type="file" accept=".txt,text/plain" class="file-input">
-            <button type="button" class="btn ghost sm" id="tf-upload-input-btn">上传到 NAS</button>
-          </div>
-        </div>
-      </div>
-      <div class="form-grid-2">
-        <div class="field">
-          <label for="tf-proxy-mode">代理策略</label>
-          <select id="tf-proxy-mode">
-            <option value="inherit">跟随全局设置</option>
-            <option value="direct">直连（不用代理）</option>
-            <option value="custom">任务独立代理</option>
-          </select>
-        </div>
-        <div class="field" id="tf-proxy-url-wrap" style="display:none">
-          <label for="tf-proxy-url">独立代理地址</label>
-          <input id="tf-proxy-url" type="text" placeholder="http://host.docker.internal:7890">
-        </div>
-        <div class="field">
-          <label for="tf-pp-mode">ExifTool 后处理</label>
-          <select id="tf-pp-mode">
-            <option value="inherit">按站点默认规则</option>
-            <option value="enabled">内置 ExifTool（可指定日期字段）</option>
-            <option value="custom">自定义后处理指令</option>
-            <option value="disabled">禁用</option>
-          </select>
-        </div>
-        <div class="field">
-          <label for="tf-skip">Skip 策略覆盖（可选）</label>
-          <input id="tf-skip" type="text" placeholder="留空沿用全局 (如 abort:10)">
-        </div>
-        <div class="field">
-          <label for="tf-subdir">子目录（可选）</label>
-          <input id="tf-subdir" type="text" placeholder="相对路径，留空使用默认目录">
-        </div>
-        <div class="field">
-          <label for="tf-extra">额外 CLI 参数（可选）</label>
-          <input id="tf-extra" type="text" placeholder="例如 --range 1-100">
-        </div>
-      </div>
-      <div class="field">
-        <label for="tf-filename">文件命名模板覆盖（可选）</label>
-        <span class="hint">留空则沿用「配置与凭据」中对应站点的命名规则；填写后将覆盖本次任务中所有站点的命名格式</span>
-        <input id="tf-filename" type="text" placeholder="例如 [{date:%Y-%m-%d}] {id}.{extension}">
-      </div>
-      <div id="tf-pp-panel" class="sub-panel stack sm-gap">
-        <div id="tf-pp-date-wrap" class="field hidden">
-          <label for="tf-pp-date">日期字段模板（默认 <code>{date:%Y-%m-%dT%H:%M:%S}</code>）</label>
-          <span class="hint">不同站点字段名可能不同（如 <code>{created_at:%Y-%m-%dT%H:%M:%S}</code>），可在额外参数里加 <code>-K</code> 试跑查看该站点的可用字段</span>
-          <input id="tf-pp-date" type="text" value="{date:%Y-%m-%dT%H:%M:%S}" placeholder="{date:%Y-%m-%dT%H:%M:%S}">
-        </div>
-        <div id="tf-pp-cmd-wrap" class="field hidden">
-          <label for="tf-pp-cmd">自定义 exec 指令（将对每个下载文件执行）</label>
-          <span class="hint">支持 <code>{_path}</code> 及 gallery-dl 元数据占位符，如 <code>exiftool -overwrite_original -DateTimeOriginal="{date:%Y:%m:%d %H:%M:%S}" "{_path}"</code></span>
-          <textarea id="tf-pp-cmd" rows="2" class="mono-area" placeholder='exiftool -overwrite_original -DateTimeOriginal="{date:%Y:%m:%d %H:%M:%S}" "{_path}"'></textarea>
-        </div>
-        <div class="field">
-          <span class="hint">实际后处理指令预览：</span>
-          <pre id="tf-pp-preview" class="cmd-preview"></pre>
-        </div>
-      </div>
-      <div class="stack xs-gap">
-        <div class="row-actions">
-          <label class="checkbox-inline"><input type="checkbox" switch role="switch" class="switch-ok" id="tf-enabled" checked> 启用定时调度</label>
-          <label class="checkbox-inline"><input type="checkbox" switch role="switch" id="tf-archive"> 启用 SQLite Archive 去重</label>
-          <label class="checkbox-inline"><input type="checkbox" switch role="switch" id="tf-archive-backfill" disabled> 跳过时回填 Archive (file+skip)</label>
-        </div>
-        <div class="hint">SQLite Archive 说明：将已下载帖子的唯一 ID 写入 <code>/data/archive.sqlite3</code>；勾选「跳过时回填」后，扫描遇到磁盘已存在的文件也会把 ID 补录进库（适合首次建库或历史文件补录）。</div>
-      </div>
-      <div class="dialog-foot">
-        <button type="button" class="btn ghost" data-close-dialog="task-dialog">取消</button>
-        <button type="submit" class="btn primary">保存任务</button>
-      </div>
-    </form>
-  </dialog>
+  <nav class="bottom-nav" aria-label="移动端主导航">
+    <a class="bottom-nav-link" data-nav="activity" href="#/">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+      <span>动态</span>
+    </a>
+    <a class="bottom-nav-link" data-nav="tasks" href="#/tasks">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg>
+      <span>任务</span>
+    </a>
+    <a class="bottom-nav-link" data-nav="runs" href="#/runs">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M16 13H8"/><path d="M16 17H8"/></svg>
+      <span>运行</span>
+    </a>
+    <a class="bottom-nav-link" data-nav="sites" href="#/sites">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+      <span>站点</span>
+    </a>
+    <a class="bottom-nav-link" data-nav="settings" href="#/settings/general">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9c.26.6.82 1 1.48 1.05H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+      <span>设置</span>
+    </a>
+  </nav>
 
-  <!-- DIALOG: SITE CREDENTIAL EDITOR -->
-  <dialog id="site-dialog" closedby="closerequest" aria-labelledby="site-dialog-title">
-    <form id="site-form" class="dialog-form stack" novalidate>
-      <div class="dialog-head">
-        <h2 id="site-dialog-title">站点凭据与配置</h2>
-        <button type="button" class="btn ghost sm dialog-close" data-close-dialog="site-dialog" aria-label="关闭弹窗">✕</button>
+  <!-- SLIDE-OVER DRAWER: NEW DOWNLOAD -->
+  <dialog id="download-drawer" class="drawer-dialog" closedby="any" aria-labelledby="download-drawer-title">
+    <form id="new-download-form" class="drawer-form" novalidate>
+      <div class="drawer-head">
+        <div>
+          <h1 id="download-drawer-title" class="dialog-title">新下载</h1>
+          <div class="muted sm">立即入队执行，不影响已有定时任务</div>
+        </div>
+        <button type="button" id="download-drawer-close" class="btn ghost sm dialog-close" aria-label="关闭抽屉">✕</button>
       </div>
-      <div class="form-grid-2">
+
+      <div class="drawer-body stack">
         <div class="field">
-          <label for="sf-site">站点标识</label>
-          <input id="sf-site" type="text" required placeholder="twitter / bluesky / rule34 / fanbox / patreon">
+          <label for="nd-urls">目标 URL（每行一个）</label>
+          <span id="nd-urls-hint" class="hint">粘贴链接后将自动识别站点并检查凭据健康状态；多链接支持自动走 <code>-i</code></span>
+          <textarea id="nd-urls" rows="4" autofocus placeholder="https://x.com/..." aria-describedby="nd-urls-hint"></textarea>
         </div>
-        <div class="field">
-          <label for="sf-skip">站点 Skip 阈值</label>
-          <input id="sf-skip" type="text" placeholder="例如 abort:10">
-        </div>
-        <div class="field">
-          <label for="sf-username">用户名 (可选)</label>
-          <input id="sf-username" type="text">
-        </div>
-        <div class="field">
-          <label for="sf-password">密码 (留空保持不变)</label>
-          <input id="sf-password" type="password" autocomplete="new-password">
-        </div>
-        <div class="field">
-          <label for="sf-userid">User ID (如 Rule34)</label>
-          <input id="sf-userid" type="text">
-        </div>
-        <div class="field">
-          <label for="sf-apikey">API Key (留空保持不变)</label>
-          <input id="sf-apikey" type="password">
-        </div>
-        <div class="field">
-          <label for="sf-browser">Browser 模拟 (如 chrome / firefox)</label>
-          <input id="sf-browser" type="text" placeholder="chrome">
-        </div>
-        <div class="field">
-          <label for="sf-user-agent">User-Agent (可选)</label>
-          <input id="sf-user-agent" type="text" placeholder="留空默认，或 +chrome / 自定义 UA">
-        </div>
-      </div>
-      <div class="field">
-        <label for="sf-filename">自定义文件名模板（可选）</label>
-        <input id="sf-filename" type="text" placeholder="[{date:%Y-%m-%d}] {id}.{extension}">
-      </div>
-      <div class="field">
-        <label for="sf-cookies">更新 Cookies（留空则保留现有 Cookies）</label>
-        <span class="hint">可直接粘贴 Netscape cookies.txt、JSON 对象/数组、或浏览器 Cookie 请求头。当前已有：<span id="sf-cookie-keys" class="muted">无</span></span>
-        <textarea id="sf-cookies" rows="4" placeholder="粘贴新的 cookies.txt 或 JSON…"></textarea>
-      </div>
-      <div class="row-actions">
-        <label class="checkbox-inline"><input type="checkbox" switch role="switch" class="switch-ok" id="sf-pp"> 为此站点启用 ExifTool 后处理</label>
-        <label class="checkbox-inline"><input type="checkbox" class="checkbox-custom" id="sf-clear-cookies"> 清空已有 Cookies</label>
-      </div>
-      <div id="sf-pp-panel" class="sub-panel stack sm-gap hidden">
+
+        <div id="nd-site-status" class="stack xs-gap hidden"></div>
+
         <div class="form-grid-2">
           <div class="field">
-            <label for="sf-pp-type">后处理方式</label>
-            <select id="sf-pp-type">
-              <option value="builtin">内置智能 ExifTool + mtime</option>
-              <option value="custom">自定义 exec 指令</option>
+            <label for="nd-file">或上传本地 .txt 链接列表</label>
+            <div class="file-picker-row">
+              <input id="nd-file" type="file" accept=".txt,text/plain" class="file-input">
+              <button type="button" class="btn ghost sm hidden" id="nd-file-clear">清除</button>
+            </div>
+            <div id="nd-file-status" class="sm muted hidden"></div>
+          </div>
+
+          <div class="field">
+            <label for="nd-input-file">或使用 NAS 列表 (/data/inputs/)</label>
+            <select id="nd-input-file">
+              <option value="">不使用 NAS 列表</option>
             </select>
           </div>
-          <div id="sf-pp-date-wrap" class="field">
-            <label for="sf-pp-date">日期字段模板</label>
-            <input id="sf-pp-date" type="text" value="{date:%Y-%m-%dT%H:%M:%S}" placeholder="{date:%Y-%m-%dT%H:%M:%S}">
-          </div>
         </div>
-        <div id="sf-pp-extra-wrap" class="field">
-          <label for="sf-pp-extra">额外 ExifTool 参数（可选）</label>
-          <input id="sf-pp-extra" type="text" placeholder="例如 -Artist={author[name]}">
-        </div>
-        <div id="sf-pp-cmd-wrap" class="field hidden">
-          <label for="sf-pp-cmd">自定义 exec 指令</label>
-          <textarea id="sf-pp-cmd" rows="2" class="mono-area" placeholder='exiftool -overwrite_original -DateTimeOriginal="{date:%Y:%m:%d %H:%M:%S}" "{_path}"'></textarea>
-        </div>
+
         <div class="field">
-          <span class="hint">该站点实际执行指令预览：</span>
-          <pre id="sf-pp-preview" class="cmd-preview"></pre>
+          <label for="nd-name">任务标签名称（可选）</label>
+          <input id="nd-name" type="text" placeholder="临时下载">
+        </div>
+
+        <details id="nd-advanced-details" class="sub-panel">
+          <summary class="details-summary">高级选项与生效配置</summary>
+          <div id="nd-options-slot" class="stack" style="margin-top:0.75rem;"></div>
+        </details>
+      </div>
+
+      <div class="drawer-foot">
+        <label class="checkbox-inline">
+          <input type="checkbox" switch role="switch" id="nd-simulate"> 仅模拟试跑
+        </label>
+        <div class="row-actions">
+          <button type="button" class="btn ghost" id="nd-cancel-btn">取消</button>
+          <button type="submit" class="btn primary" id="nd-submit-btn">加入下载队列</button>
         </div>
       </div>
-      <div class="dialog-foot">
-        <button type="button" class="btn ghost" data-close-dialog="site-dialog">取消</button>
-        <button type="submit" class="btn primary">保存站点配置</button>
-      </div>
     </form>
   </dialog>
 
-  <!-- DIALOG: RAW JSON CONFIG -->
-  <dialog id="raw-dialog" closedby="closerequest" aria-labelledby="raw-dialog-title">
-    <form id="raw-form" class="dialog-form stack" novalidate>
+  <!-- CONFIRMATION DIALOG -->
+  <dialog id="confirm-dialog" closedby="closerequest" aria-labelledby="confirm-dialog-title">
+    <form method="dialog" class="dialog-form stack">
       <div class="dialog-head">
-        <h2 id="raw-dialog-title">高级 JSON 配置编辑</h2>
-        <button type="button" class="btn ghost sm dialog-close" data-close-dialog="raw-dialog" aria-label="关闭弹窗">✕</button>
+        <h1 id="confirm-dialog-title" class="dialog-title">确认操作</h1>
       </div>
-      <div class="field">
-        <label for="rf-note">本次修改备注</label>
-        <input id="rf-note" type="text" value="手动编辑 JSON 配置">
-      </div>
-      <div class="field">
-        <label for="rf-json">gallery-dl 基础配置 JSON</label>
-        <textarea id="rf-json" rows="16" class="mono-area"></textarea>
-      </div>
+      <p id="confirm-dialog-message" class="muted" style="margin:0;"></p>
       <div class="dialog-foot">
-        <button type="button" class="btn ghost" data-close-dialog="raw-dialog">取消</button>
-        <button type="submit" class="btn primary">校验并保存</button>
+        <button type="submit" value="cancel" class="btn ghost" autofocus>取消</button>
+        <button type="submit" id="confirm-dialog-ok" value="confirm" class="btn primary">确定</button>
       </div>
     </form>
   </dialog>
 
-  <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
-  <script src="/static/app.js" type="module"></script>
+  <div id="toast-region" class="toast-region" role="status" aria-live="polite"></div>
+  <script type="module" src="/static/js/main.js"></script>
 </body>
 </html>

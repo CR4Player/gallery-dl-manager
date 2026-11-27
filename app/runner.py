@@ -198,6 +198,17 @@ class TaskManager:
             except asyncio.QueueFull:
                 pass
 
+    def subscribe_global(self) -> asyncio.Queue[dict[str, Any]]:
+        q: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=200)
+        self.global_subscribers.add(q)
+        return q
+
+    def unsubscribe_global(self, q: asyncio.Queue[dict[str, Any]]) -> None:
+        self.global_subscribers.discard(q)
+
+    def emit_global(self, event: dict[str, Any]) -> None:
+        self._emit_global_event(event)
+
     def _emit_global_event(self, event: dict[str, Any]) -> None:
         for q in list(self.global_subscribers):
             if q.full():
@@ -350,6 +361,7 @@ class TaskManager:
                     (utc_now_iso(), run_id),
                 )
                 self._emit_run_event(run_id, {"type": "done", "status": "cancelled"})
+                self._emit_global_event({"type": "run_finished", "run_id": run_id, "status": "cancelled"})
                 return True
         return False
 

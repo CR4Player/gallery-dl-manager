@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import mimetypes
 import sqlite3
 import urllib.request
 from contextlib import asynccontextmanager
@@ -20,6 +21,7 @@ from starlette.staticfiles import StaticFiles
 
 from app import alerts
 from app import cron as cron_mod
+from app import insights
 from app import notifier
 from app import twitter_likes
 from app.auth import SESSION_COOKIE_NAME, AuthManager, cookie_secure_flag, is_auth_disabled
@@ -41,12 +43,16 @@ from app.config_manager import (
     save_input_file,
     save_postprocess_site_configs,
     summarize_sites,
+    synthesize_runtime_config,
     validate_input_filename,
     validate_safe_subdir,
 )
-from app.db import Database, utc_now_iso
+from app.db import Database, get_data_dir, utc_now_iso
 from app.runner import DEFAULT_LOG_TAIL_LINES, MAX_LOG_TAIL_LINES, TaskManager, tail_log_lines
 from app.version import get_versions
+
+mimetypes.add_type("application/javascript", ".js")
+mimetypes.add_type("text/css", ".css")
 
 STATIC_DIR = Path(__file__).parent / "static"
 
@@ -437,7 +443,25 @@ def create_app(db: Database | None = None) -> Starlette:
     async def api_alerts_list(request: Request) -> Response:
         if err := _guard_api(request):
             return err
-        return JSONResponse(alerts.list_alerts(database, limit=50))
+        data = alerts.list_alerts(database, limit=50)
+        run_ids = sorted({int(it["run_id"]) for it in data["items"] if it.get("kind") == "run_error" and it.get("run_id")})
+        if run_ids:
+            conf = load_global_config(database)
+            known_sites = list((conf.get("extractor") or {}).keys()) if isinstance(conf.get("extractor"), dict) else []
+            placeholders = ",".join("?" for _ in run_ids)
+            with database.session() as conn:
+                rrows = conn.execute(
+                    f"SELECT id, urls_json FROM runs WHERE id IN ({placeholders})",
+                    run_ids,
+                ).fetchall()
+            run_sites = {
+                int(r["id"]): insights.match_sites(json.loads(r["urls_json"] or "[]"), known_sites=known_sites)
+                for r in rrows
+            }
+            for it in data["items"]:
+                if it.get("kind") == "run_error" and it.get("run_id") in run_sites:
+                    it["sites"] = run_sites[int(it["run_id"])]
+        return JSONResponse(data)
 
     async def api_alerts_read(request: Request) -> Response:
         if err := _guard_api(request):
@@ -448,7 +472,8 @@ def create_app(db: Database | None = None) -> Starlette:
             alert_key=body.get("alert_key"),
             mark_all=bool(body.get("all")),
         )
-        return JSONResponse(alerts.list_alerts(database, limit=50))
+        manager.emit_global({"type": "alerts_changed"})
+        return await api_alerts_list(request)
 
     async def api_alerts_clear(request: Request) -> Response:
         if err := _guard_api(request):
@@ -459,18 +484,21 @@ def create_app(db: Database | None = None) -> Starlette:
             alert_key=body.get("alert_key"),
             clear_all=bool(body.get("all")),
         )
-        return JSONResponse(alerts.list_alerts(database, limit=50))
+        manager.emit_global({"type": "alerts_changed"})
+        return await api_alerts_list(request)
 
     async def api_scheduler_pause(request: Request) -> Response:
         if err := _guard_api(request):
             return err
         database.set_setting("scheduler_paused", "1")
+        manager.emit_global({"type": "scheduler", "paused": True})
         return JSONResponse({"scheduler_paused": True})
 
     async def api_scheduler_resume(request: Request) -> Response:
         if err := _guard_api(request):
             return err
         database.set_setting("scheduler_paused", "0")
+        manager.emit_global({"type": "scheduler", "paused": False})
         return JSONResponse({"scheduler_paused": False})
 
     async def api_download(request: Request) -> Response:
@@ -516,9 +544,40 @@ def create_app(db: Database | None = None) -> Starlette:
     async def api_tasks_list(request: Request) -> Response:
         if err := _guard_api(request):
             return err
+        conf = load_global_config(database)
+        known_sites = list((conf.get("extractor") or {}).keys()) if isinstance(conf.get("extractor"), dict) else []
+        recent_map = insights.fetch_tasks_recent_statuses(database, limit_per_task=10)
         with database.session() as conn:
             rows = conn.execute("SELECT * FROM tasks ORDER BY id ASC").fetchall()
-        return JSONResponse({"tasks": [_task_row_to_dict(r) for r in rows]})
+        tasks_out = []
+        for r in rows:
+            td = _task_row_to_dict(r)
+            td["recent_statuses"] = recent_map.get(int(td["id"]), [])
+            td["sites"] = insights.match_sites(td["urls"], known_sites=known_sites, input_file=td.get("input_file", ""))
+            tasks_out.append(td)
+        return JSONResponse({"tasks": tasks_out})
+
+    async def api_tasks_detail(request: Request) -> Response:
+        if err := _guard_api(request):
+            return err
+        task_id = int(request.path_params["task_id"])
+        with database.session() as conn:
+            row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        if not row:
+            return JSONResponse({"error": "任务不存在"}, status_code=404)
+        conf = load_global_config(database)
+        known_sites = list((conf.get("extractor") or {}).keys()) if isinstance(conf.get("extractor"), dict) else []
+        detail = insights.compute_task_detail(database, row, known_sites=known_sites)
+        task_dict = _task_row_to_dict(row)
+        task_dict["sites"] = detail["sites"]
+        return JSONResponse(
+            {
+                "task": task_dict,
+                "recent_runs": [_run_with_live(r) for r in detail["recent_rows"]],
+                "health": detail["health"],
+                "sites": detail["sites"],
+            }
+        )
 
     async def api_tasks_create(request: Request) -> Response:
         if err := _guard_api(request):
@@ -582,6 +641,7 @@ def create_app(db: Database | None = None) -> Starlette:
             )
             task_id = int(cur.lastrowid)
             row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        manager.emit_global({"type": "tasks_changed"})
         return JSONResponse({"task": _task_row_to_dict(row)}, status_code=201)
 
     async def api_tasks_update(request: Request) -> Response:
@@ -647,6 +707,7 @@ def create_app(db: Database | None = None) -> Starlette:
             if cur.rowcount == 0:
                 return JSONResponse({"error": "任务不存在"}, status_code=404)
             row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        manager.emit_global({"type": "tasks_changed"})
         return JSONResponse({"task": _task_row_to_dict(row)})
 
     async def api_tasks_delete(request: Request) -> Response:
@@ -657,6 +718,7 @@ def create_app(db: Database | None = None) -> Starlette:
             cur = conn.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
             if cur.rowcount == 0:
                 return JSONResponse({"error": "任务不存在"}, status_code=404)
+        manager.emit_global({"type": "tasks_changed"})
         return JSONResponse({"ok": True})
 
     async def api_tasks_run(request: Request) -> Response:
@@ -688,6 +750,7 @@ def create_app(db: Database | None = None) -> Starlette:
             updated = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
         if new_val == 1:
             database.delete_setting("legacy_import_notice")
+        manager.emit_global({"type": "tasks_changed"})
         return JSONResponse({"task": _task_row_to_dict(updated)})
 
     async def api_tasks_enable_all(request: Request) -> Response:
@@ -696,6 +759,7 @@ def create_app(db: Database | None = None) -> Starlette:
         with database.session() as conn:
             conn.execute("UPDATE tasks SET enabled = 1, updated_at = ?", (utc_now_iso(),))
         database.delete_setting("legacy_import_notice")
+        manager.emit_global({"type": "tasks_changed"})
         return JSONResponse({"ok": True})
 
     async def api_tasks_batch(request: Request) -> Response:
@@ -732,6 +796,7 @@ def create_app(db: Database | None = None) -> Starlette:
                 )
         if action == "enable":
             database.delete_setting("legacy_import_notice")
+        manager.emit_global({"type": "tasks_changed"})
         return JSONResponse({"ok": True, "affected": cur.rowcount})
 
     async def api_tasks_dismiss_notice(request: Request) -> Response:
@@ -758,6 +823,7 @@ def create_app(db: Database | None = None) -> Starlette:
             return err
         status_filter = request.query_params.get("status", "").strip()
         task_id_raw = request.query_params.get("task_id", "").strip()
+        before_id_raw = request.query_params.get("before_id", "").strip()
         limit = max(1, min(200, int(request.query_params.get("limit", "50"))))
         offset = max(0, int(request.query_params.get("offset", "0")))
 
@@ -769,6 +835,9 @@ def create_app(db: Database | None = None) -> Starlette:
         if task_id_raw.isdigit():
             clauses.append("task_id = ?")
             params.append(int(task_id_raw))
+        if before_id_raw.isdigit():
+            clauses.append("id < ?")
+            params.append(int(before_id_raw))
         where_sql = ("WHERE " + " AND ".join(clauses)) if clauses else ""
 
         with database.session() as conn:
@@ -977,6 +1046,7 @@ def create_app(db: Database | None = None) -> Starlette:
         if "timeout" in body:
             downloader["timeout"] = max(5.0, min(300.0, float(body["timeout"])))
         save_global_config(database, conf, note="更新全局下载与后处理设置")
+        manager.emit_global({"type": "config_changed"})
         return JSONResponse({"ok": True})
 
     async def api_config_proxy_test(request: Request) -> Response:
@@ -1123,6 +1193,7 @@ def create_app(db: Database | None = None) -> Starlette:
             }
             save_postprocess_site_configs(database, site_cfgs)
 
+        manager.emit_global({"type": "config_changed"})
         return JSONResponse({"ok": True, "cookie_count": len(site_cfg.get("cookies", {}))})
 
     async def api_config_postprocess_preview(request: Request) -> Response:
@@ -1148,7 +1219,119 @@ def create_app(db: Database | None = None) -> Starlette:
         if isinstance(extractor, dict) and site in extractor:
             extractor.pop(site)
             save_global_config(database, conf, note=f"删除站点 {site} 配置")
+            manager.emit_global({"type": "config_changed"})
         return JSONResponse({"ok": True})
+
+    async def api_config_effective(request: Request) -> Response:
+        if err := _guard_api(request):
+            return err
+        body = await request.json()
+        try:
+            res = insights.compute_effective_config(database, body if isinstance(body, dict) else {})
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        return JSONResponse(res)
+
+    async def api_sites_health(request: Request) -> Response:
+        if err := _guard_api(request):
+            return err
+        settings = get_app_settings(database)
+        conf = load_global_config(database)
+        return JSONResponse({"sites": insights.compute_sites_health(database, conf, settings)})
+
+    async def api_events_stream(request: Request) -> Response:
+        if not _is_authenticated(request):
+            return JSONResponse({"error": "未登录或会话已过期"}, status_code=401)
+        q = manager.subscribe_global()
+
+        async def event_gen():
+            try:
+                settings = get_app_settings(database)
+                with database.session() as conn:
+                    running = conn.execute("SELECT COUNT(*) FROM runs WHERE status = 'running'").fetchone()[0]
+                    queued = conn.execute("SELECT COUNT(*) FROM runs WHERE status = 'queued'").fetchone()[0]
+                unread = alerts.list_alerts(database, limit=50)["unread_count"]
+                hello = {
+                    "type": "hello",
+                    "scheduler_paused": settings["scheduler_paused"],
+                    "running_count": int(running),
+                    "queued_count": int(queued),
+                    "unread_alerts_count": int(unread),
+                }
+                yield f"data: {json.dumps(hello, ensure_ascii=False)}\n\n"
+
+                while True:
+                    if await request.is_disconnected():
+                        break
+                    try:
+                        ev = await asyncio.wait_for(q.get(), timeout=15.0)
+                        yield f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"
+                    except asyncio.TimeoutError:
+                        yield ": keepalive\n\n"
+            finally:
+                manager.unsubscribe_global(q)
+
+        return StreamingResponse(
+            event_gen(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    async def api_probe_metadata(request: Request) -> Response:
+        if err := _guard_api(request):
+            return err
+        body = await request.json()
+        url = str(body.get("url", "")).strip()
+        if not url or url.startswith("-"):
+            return JSONResponse({"ok": False, "error": "请先提供一条有效的 HTTP/HTTPS URL"}, status_code=400)
+        proxy_mode = str(body.get("proxy_mode", "inherit")).strip() or "inherit"
+        proxy_url = str(body.get("proxy_url", "")).strip()
+
+        settings = get_app_settings(database)
+        base_conf = load_global_config(database)
+        runtime_conf = synthesize_runtime_config(
+            base_conf,
+            global_proxy=settings["global_proxy"],
+            proxy_mode=proxy_mode,
+            proxy_url=proxy_url,
+            postprocess_mode="disabled",
+        )
+        secret_values = extract_secret_values(runtime_conf, extra_secrets=[proxy_url, settings["global_proxy"]])
+        tmp_conf_path = get_data_dir() / f".probe-conf-{id(request)}.json"
+        tmp_conf_path.write_text(json.dumps(runtime_conf, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "gallery-dl",
+                "-c",
+                str(tmp_conf_path),
+                "-K",
+                "--range",
+                "1",
+                "--",
+                url,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+            try:
+                raw_out, _ = await asyncio.wait_for(proc.communicate(), timeout=20.0)
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()
+                return JSONResponse({"ok": False, "error": "探测超时（20s），请检查网络或代理设置"})
+            text = redact_text(raw_out.decode("utf-8", errors="replace"), secret_values)
+            keys = insights.parse_gallery_dl_k_output(text)
+            if proc.returncode != 0 and not keys:
+                err_lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+                msg = err_lines[-1] if err_lines else f"gallery-dl 退出码 {proc.returncode}"
+                return JSONResponse({"ok": False, "error": msg, "raw_preview": text[:2000]})
+            return JSONResponse({"ok": True, "keys": keys, "raw_preview": text[:4000]})
+        except FileNotFoundError:
+            return JSONResponse({"ok": False, "error": "当前运行环境未安装 gallery-dl 可执行文件"})
+        except Exception as exc:
+            return JSONResponse({"ok": False, "error": redact_text(str(exc), secret_values)})
+        finally:
+            tmp_conf_path.unlink(missing_ok=True)
 
     async def api_config_raw_get(request: Request) -> Response:
         if err := _guard_api(request):
@@ -1169,6 +1352,7 @@ def create_app(db: Database | None = None) -> Starlette:
         except Exception as exc:
             return JSONResponse({"error": f"JSON 格式错误: {exc}"}, status_code=400)
         snap_id = save_global_config(database, parsed, note=note)
+        manager.emit_global({"type": "config_changed"})
         return JSONResponse({"ok": True, "snapshot_id": snap_id})
 
     async def api_config_snapshot_restore(request: Request) -> Response:
@@ -1181,6 +1365,7 @@ def create_app(db: Database | None = None) -> Starlette:
             return JSONResponse({"error": "配置快照不存在"}, status_code=404)
         parsed = json.loads(row["config_json"])
         new_id = save_global_config(database, parsed, note=f"回滚至快照 #{snap_id}")
+        manager.emit_global({"type": "config_changed"})
         return JSONResponse({"ok": True, "snapshot_id": new_id})
 
     async def api_inputs_list(request: Request) -> Response:
@@ -1355,6 +1540,7 @@ def create_app(db: Database | None = None) -> Starlette:
         Route("/api/tasks/enable-all", api_tasks_enable_all, methods=["POST"]),
         Route("/api/tasks/batch", api_tasks_batch, methods=["POST"]),
         Route("/api/tasks/dismiss-import-notice", api_tasks_dismiss_notice, methods=["POST"]),
+        Route("/api/tasks/{task_id:int}", api_tasks_detail, methods=["GET"]),
         Route("/api/tasks/{task_id:int}", api_tasks_update, methods=["PUT"]),
         Route("/api/tasks/{task_id:int}", api_tasks_delete, methods=["DELETE"]),
         Route("/api/tasks/{task_id:int}/run", api_tasks_run, methods=["POST"]),
@@ -1366,10 +1552,14 @@ def create_app(db: Database | None = None) -> Starlette:
         Route("/api/runs/{run_id:int}/stream", api_runs_stream, methods=["GET"]),
         Route("/api/runs/{run_id:int}/cancel", api_runs_cancel, methods=["POST"]),
         Route("/api/runs/{run_id:int}/retry", api_runs_retry, methods=["POST"]),
+        Route("/api/events", api_events_stream, methods=["GET"]),
+        Route("/api/probe-metadata", api_probe_metadata, methods=["POST"]),
         Route("/api/config/overview", api_config_overview, methods=["GET"]),
         Route("/api/config/settings", api_config_settings, methods=["PUT"]),
+        Route("/api/config/effective", api_config_effective, methods=["POST"]),
         Route("/api/config/proxy-test", api_config_proxy_test, methods=["POST"]),
         Route("/api/config/postprocess-preview", api_config_postprocess_preview, methods=["POST"]),
+        Route("/api/sites/health", api_sites_health, methods=["GET"]),
         Route("/api/config/site/{site:str}", api_config_site_get, methods=["GET"]),
         Route("/api/config/site/{site:str}", api_config_site_put, methods=["PUT"]),
         Route("/api/config/site/{site:str}", api_config_site_delete, methods=["DELETE"]),
