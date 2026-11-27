@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="color-scheme" content="light dark">
+  <script>
+    try {
+      const saved = localStorage.getItem("color-scheme");
+      if (saved === "light" || saved === "dark") {
+        document.querySelector('meta[name="color-scheme"]').content = saved;
+      }
+    } catch {}
+  </script>
+  <title>gallery-dl-manager · 访问验证</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body class="auth-body">
+  <main class="auth-shell">
+    <section class="card auth-card" aria-labelledby="auth-title">
+      <div class="auth-brand">
+        <span class="brand-badge">GDL</span>
+        <div>
+          <h1 id="auth-title">gallery-dl-manager</h1>
+          <p class="muted" id="auth-subtitle">正在检查初始化状态…</p>
+        </div>
+      </div>
+
+      <form id="setup-form" class="stack hidden" novalidate>
+        <div class="notice info">
+          首次启动请在 NAS 容器日志中查看 <code>[SETUP] SETUP_TOKEN=...</code> 一次性初始化口令。
+        </div>
+        <div class="field">
+          <label for="setup-token">初始化口令</label>
+          <span id="setup-token-hint" class="hint">来自 docker compose logs gallery-dl-manager</span>
+          <input id="setup-token" name="token" type="text" required autocomplete="one-time-code" aria-describedby="setup-token-hint" data-error="setup-token-error">
+          <div id="setup-token-error" class="error-msg"><span role="img" aria-label="错误">❌</span> 请输入容器日志中的初始化口令。</div>
+        </div>
+        <div class="field">
+          <label for="setup-password">设置管理员密码</label>
+          <span id="setup-password-hint" class="hint">至少 6 位字符，用于保护控制台与 API</span>
+          <input id="setup-password" name="password" type="password" required minlength="6" autocomplete="new-password" aria-describedby="setup-password-hint" data-error="setup-password-error">
+          <div id="setup-password-error" class="error-msg"><span role="img" aria-label="错误">❌</span> 密码至少需要 6 位字符。</div>
+        </div>
+        <div class="field">
+          <label for="setup-password2">确认管理员密码</label>
+          <input id="setup-password2" name="password2" type="password" required minlength="6" autocomplete="new-password" data-error="setup-password2-error">
+          <div id="setup-password2-error" class="error-msg"><span role="img" aria-label="错误">❌</span> 请再次输入相同的密码。</div>
+        </div>
+        <div id="setup-server-error" class="notice danger hidden" role="alert"></div>
+        <button type="submit" class="btn primary full">完成初始化并进入控制台</button>
+      </form>
+
+      <form id="login-form" class="stack hidden" novalidate>
+        <div class="field">
+          <label for="login-password">管理员密码</label>
+          <span id="login-password-hint" class="hint">若忘记密码，可执行 --reset-web-auth 重置</span>
+          <input id="login-password" name="password" type="password" required autocomplete="current-password" aria-describedby="login-password-hint" data-error="login-password-error">
+          <div id="login-password-error" class="error-msg"><span role="img" aria-label="错误">❌</span> 请输入管理员密码。</div>
+        </div>
+        <div id="login-server-error" class="notice danger hidden" role="alert"></div>
+        <button type="submit" class="btn primary full">登录控制台</button>
+      </form>
+    </section>
+  </main>
+
+  <script>
+    (() => {
+      const announcer = document.createElement("div");
+      announcer.setAttribute("aria-live", "polite");
+      announcer.classList.add("visually-hidden");
+      document.body.append(announcer);
+
+      const syncInput = (el) => {
+        if (!el.matches?.("input")) return;
+        const invalid = el.matches(":user-invalid") || el.classList.contains("user-invalid-fallback");
+        el.setAttribute("aria-invalid", invalid ? "true" : "false");
+        const errId = el.dataset.error;
+        if (errId) {
+          const ids = (el.getAttribute("aria-describedby") || "").split(/\s+/).filter((x) => x && x !== errId);
+          if (invalid) ids.push(errId);
+          if (ids.length) el.setAttribute("aria-describedby", ids.join(" "));
+          else el.removeAttribute("aria-describedby");
+        }
+      };
+
+      if (!CSS.supports("selector(:user-invalid)")) {
+        const dirty = new WeakMap();
+        document.addEventListener("blur", (e) => {
+          const st = dirty.get(e.target) || { i: false, b: false };
+          st.b = true;
+          dirty.set(e.target, st);
+          if (st.i && e.target.validity) {
+            e.target.classList.toggle("user-invalid-fallback", !e.target.validity.valid);
+            syncInput(e.target);
+          }
+        }, true);
+        document.addEventListener("input", (e) => {
+          const st = dirty.get(e.target) || { i: false, b: false };
+          st.i = true;
+          dirty.set(e.target, st);
+          if (st.b && e.target.validity) {
+            e.target.classList.toggle("user-invalid-fallback", !e.target.validity.valid);
+            syncInput(e.target);
+          }
+        });
+      }
+      document.addEventListener("blur", (e) => syncInput(e.target), true);
+      document.addEventListener("input", (e) => syncInput(e.target));
+
+      const setupForm = document.getElementById("setup-form");
+      const loginForm = document.getElementById("login-form");
+      const subtitle = document.getElementById("auth-subtitle");
+
+      async function init() {
+        const res = await fetch("/api/auth/status");
+        const data = await res.json();
+        if (data.authenticated || data.auth_disabled) {
+          location.replace("/");
+          return;
+        }
+        if (!data.configured) {
+          subtitle.textContent = "首次启动初始化设置";
+          setupForm.classList.remove("hidden");
+          document.getElementById("setup-token").focus();
+        } else {
+          subtitle.textContent = "输入密码以访问控制台";
+          loginForm.classList.remove("hidden");
+          document.getElementById("login-password").focus();
+        }
+      }
+
+      setupForm.addEventListener("submit", async (e) => {
+        e.preventDefault();
+        const errBox = document.getElementById("setup-server-error");
+        errBox.classList.add("hidden");
+        const token = document.getElementById("setup-token").value.trim();
+        const pw = document.getElementById("setup-password").value;
+        const pw2 = document.getElementById("setup-password2").value;
+        if (!setupForm.checkValidity()) {
+          setupForm.querySelectorAll("input").forEach((el) => {
+            if (!el.validity.valid) el.classList.add("user-invalid-fallback");
+            syncInput(el);
+          });
+          setupForm.querySelector(":invalid")?.focus();
+          return;
+        }
+        if (pw !== pw2) {
+          errBox.textContent = "两次输入的密码不一致";
+          errBox.classList.remove("hidden");
+          return;
+        }
+        const res = await fetch("/api/auth/setup", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "X-Requested-With": "fetch" },
+          body: JSON.stringify({ token, password: pw }),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          errBox.textContent = data.error || "初始化失败";
+          errBox.classList.remove("hidden");
+          announcer.textContent = errBox.textContent;
+          return;
+        }
+        location.replace("/");
+      });
+
+      loginForm.addEventListener("submit", async (e) => {
+        e.preventDefault();
+        const errBox = document.getElementById("login-server-error");
+        errBox.classList.add("hidden");
+        if (!loginForm.checkValidity()) {
+          loginForm.querySelectorAll("input").forEach((el) => {
+            if (!el.validity.valid) el.classList.add("user-invalid-fallback");
+            syncInput(el);
+          });
+          loginForm.querySelector(":invalid")?.focus();
+          return;
+        }
+        const pw = document.getElementById("login-password").value;
+        const res = await fetch("/api/auth/login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "X-Requested-With": "fetch" },
+          body: JSON.stringify({ password: pw }),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          errBox.textContent = data.error || "登录失败";
+          errBox.classList.remove("hidden");
+          announcer.textContent = errBox.textContent;
+          return;
+        }
+        location.replace("/");
+      });
+
+      init();
+    })();
+  </script>
+</body>
+</html>

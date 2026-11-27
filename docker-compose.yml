@@ -1,0 +1,25 @@
+services:
+  gallery-dl-manager:
+    image: ghcr.io/cr4player/gallery-dl-manager:latest
+    # 如需本地源码构建，取消下面一行注释：
+    # build: .
+    container_name: gallery-dl-manager
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 20s
+    user: "${PUID:-1026}:${PGID:-100}"
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      IMPORT_TASKS_ENABLED: ${IMPORT_TASKS_ENABLED:-false}
+      WEB_AUTH_DISABLED: ${WEB_AUTH_DISABLED:-false}
+      WEB_COOKIE_SECURE: ${WEB_COOKIE_SECURE:-0}
+      INTERNAL_PORT: "8766"
+    ports:
+      - "${WEB_BIND_IP:-0.0.0.0}:${WEB_PORT:-8766}:8766"
+    volumes:
+      - ./data:/data
+      - ${DOWNLOAD_HOST_DIR:-./downloads}:/gallery-dl
+      # 如需首次启动只读导入旧版 gallery-dl.conf，取消下方注释：
+      # - ${LEGACY_CONF_PATH:-./legacy-gallery-dl.conf}:/config/legacy-gallery-dl.conf:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
