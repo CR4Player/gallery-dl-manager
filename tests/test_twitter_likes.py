@@ -126,10 +126,16 @@ class TwitterLikesTests(unittest.TestCase):
     def test_render_userscript(self) -> None:
         script = render_userscript("http://192.0.2.10:8766/", "abc_token_123", "192.0.2.10")
         self.assertIn("==UserScript==", script)
+        self.assertIn("// @version      1.1.0", script)
         self.assertIn('"http://192.0.2.10:8766"', script)
         self.assertIn('"abc_token_123"', script)
         self.assertIn("// @connect      192.0.2.10", script)
         self.assertIn("/api/archive/twitter-ids", script)
+        self.assertIn("rgb(168, 85, 247)", script)
+        self.assertIn("M20.884 13.19", script)
+        self.assertIn("gdlmOrigD", script)
+        self.assertNotIn("gdlm-archived-tag", script)
+        self.assertNotIn("已存", script)
 
 
 if __name__ == "__main__":

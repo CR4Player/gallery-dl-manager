@@ -259,8 +259,8 @@ def render_userscript(server_url: str, token: str, connect_host: str = "") -> st
     return f"""// ==UserScript==
 // @name         gallery-dl-manager X 永久红心同步
 // @namespace    gallery-dl-manager
-// @version      1.0.0
-// @description  将 NAS 上的 Twitter 历史存档与 X 官方 like.js 同步到浏览器，永久标出“已存”红心，避免重复点赞打断增量抓取
+// @version      1.1.0
+// @description  将 NAS 上的 Twitter 历史存档与 X 官方 like.js 同步到浏览器，用紫色实心爱心标出历史喜欢，避免重复点赞打断增量抓取
 // @match        https://x.com/*
 // @match        https://twitter.com/*
 // @grant        GM_xmlhttpRequest
@@ -280,32 +280,15 @@ def render_userscript(server_url: str, token: str, connect_host: str = "") -> st
   const DB_NAME = "gdlm_x_permanent_likes";
   const STORE_NAME = "ids";
   const SYNC_INTERVAL_MS = 30 * 60 * 1000;
-  const HEART_PATH = "M16.697 5.5c-1.222-.06-2.679.51-3.89 2.16l-.805 1.09-.806-1.09C9.984 6.01 8.526 5.44 7.304 5.5c-1.243.07-2.349.78-2.91 1.91-.552 1.12-.633 2.78.479 4.82 1.074 1.97 3.257 4.27 7.129 6.61 3.87-2.34 6.052-4.64 7.126-6.61 1.111-2.04 1.03-3.7.477-4.82-.561-1.13-1.666-1.84-2.908-1.91zm4.187 7.69c-1.351 2.48-4.001 5.12-8.379 7.67l-.503.3-.504-.3c-4.379-2.55-7.029-5.19-8.382-7.67-1.36-2.5-1.41-4.86-.514-6.67.887-1.79 2.647-2.91 4.601-3.01 1.651-.09 3.368.56 4.798 2.01 1.429-1.45 3.146-2.1 4.796-2.01 1.954.1 3.714 1.22 4.601 3.01.896 1.81.846 4.17-.514 6.67z";
+  const SOLID_HEART_PATH = "M20.884 13.19c-1.351 2.48-4.001 5.12-8.379 7.67l-.503.3-.504-.3c-4.379-2.55-7.029-5.19-8.382-7.67-1.36-2.5-1.41-4.86-.514-6.67.887-1.79 2.647-2.91 4.601-3.01 1.651-.09 3.368.56 4.798 2.01 1.429-1.45 3.146-2.1 4.796-2.01 1.954.1 3.714 1.22 4.601 3.01.896 1.81.846 4.17-.514 6.67z";
 
   GM_addStyle(`
     [data-testid="like"].gdlm-archived-like {{
-      color: rgb(249, 24, 128) !important;
+      color: rgb(168, 85, 247) !important;
     }}
     [data-testid="like"].gdlm-archived-like svg {{
-      color: rgb(249, 24, 128) !important;
-      fill: rgb(249, 24, 128) !important;
-    }}
-    .gdlm-archived-tag {{
-      display: inline-flex;
-      align-items: center;
-      margin-left: 4px;
-      padding: 0 5px;
-      height: 16px;
-      border-radius: 999px;
-      font-size: 10px;
-      font-weight: 700;
-      line-height: 1;
-      color: #fff;
-      background: rgba(249, 24, 128, 0.88);
-      border: 1px solid rgba(255, 255, 255, 0.25);
-      pointer-events: none;
-      vertical-align: middle;
-      white-space: nowrap;
+      color: rgb(168, 85, 247) !important;
+      fill: rgb(168, 85, 247) !important;
     }}
   `);
 
@@ -475,8 +458,13 @@ def render_userscript(server_url: str, token: str, connect_host: str = "") -> st
 
     const unlikeBtn = article.querySelector('[data-testid="unlike"]');
     if (unlikeBtn) {{
-      unlikeBtn.classList.remove("gdlm-archived-like");
-      unlikeBtn.querySelectorAll(".gdlm-archived-tag").forEach((el) => el.remove());
+      if (unlikeBtn.classList.contains("gdlm-archived-like") || unlikeBtn.dataset.gdlmArchived) {{
+        unlikeBtn.classList.remove("gdlm-archived-like");
+        delete unlikeBtn.dataset.gdlmArchived;
+        unlikeBtn.removeAttribute("title");
+        const svgPath = unlikeBtn.querySelector("svg path");
+        if (svgPath) delete svgPath.dataset.gdlmOrigD;
+      }}
       return;
     }}
 
@@ -484,24 +472,26 @@ def render_userscript(server_url: str, token: str, connect_host: str = "") -> st
     if (!likeBtn) return;
 
     if (!likedSet.has(tweetId)) {{
-      if (likeBtn.classList.contains("gdlm-archived-like")) {{
+      if (likeBtn.classList.contains("gdlm-archived-like") || likeBtn.dataset.gdlmArchived) {{
         likeBtn.classList.remove("gdlm-archived-like");
-        likeBtn.querySelectorAll(".gdlm-archived-tag").forEach((el) => el.remove());
+        delete likeBtn.dataset.gdlmArchived;
+        likeBtn.removeAttribute("title");
+        const svgPath = likeBtn.querySelector("svg path");
+        if (svgPath && "gdlmOrigD" in svgPath.dataset) {{
+          if (svgPath.dataset.gdlmOrigD) svgPath.setAttribute("d", svgPath.dataset.gdlmOrigD);
+          delete svgPath.dataset.gdlmOrigD;
+        }}
       }}
       return;
     }}
 
     likeBtn.classList.add("gdlm-archived-like");
+    likeBtn.dataset.gdlmArchived = "1";
     likeBtn.title = "已在 gallery-dl-manager 历史喜欢/存档中（X 未显示红心），无需重复点赞";
     const svgPath = likeBtn.querySelector("svg path");
-    if (svgPath && svgPath.getAttribute("d") !== HEART_PATH) {{
-      svgPath.setAttribute("d", HEART_PATH);
-    }}
-    if (!likeBtn.querySelector(".gdlm-archived-tag")) {{
-      const tag = document.createElement("span");
-      tag.className = "gdlm-archived-tag";
-      tag.textContent = "已存";
-      likeBtn.appendChild(tag);
+    if (svgPath && svgPath.getAttribute("d") !== SOLID_HEART_PATH) {{
+      if (!svgPath.dataset.gdlmOrigD) svgPath.dataset.gdlmOrigD = svgPath.getAttribute("d") || "";
+      svgPath.setAttribute("d", SOLID_HEART_PATH);
     }}
   }}
 
